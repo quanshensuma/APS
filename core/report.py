@@ -313,16 +313,22 @@ h1 {{ font-size: 20px; margin: 0 0 6px; }}
 # 3. 风险清单
 # ============================================================
 
-def decide_status(planned_end, due, qty_total, qty_planned, horizon):
+def decide_status(planned_end, due, qty_total, qty_planned, horizon,
+                  priority=3):
     """纯函数：判定订单状态。
 
     【与前端 engine.js 的 summarize 判定顺序严格对齐】
       1. 一道都没排 / 没排全        → unplannable
       2. 交期（顺延周日）在窗口之后  → not_in_horizon（不算延期）
-      3. 无硬交期                    → ok（只报预计完工）
+      3. 无硬交期                    → urgent_no_due（客户催过）/ ok
       4. 完工 > 交期                 → delayed
       5. 余量 < 一个班次             → at_risk
       6. 其它                        → ok
+
+    【第 3 步为什么要分叉】无硬交期的单原来一律报「准时」，
+    但备注写「客户催，越早越好」「尽快」的单实际完工可能远晚于本周窗口，
+    报「准时」等于给客户一个假的确定。priority >= 5 单独成状态，
+    只报预计完工，不编交期。
     """
     if qty_planned <= 0 or planned_end is None:
         return "unplannable"
@@ -333,7 +339,8 @@ def decide_status(planned_end, due, qty_total, qty_planned, horizon):
     if due is not None and not info["in_horizon"]:
         return "not_in_horizon"          # 交期在窗口后，本周排不排都不算延期
     if info["axis"] is None:
-        return "ok"                      # 无硬交期
+        # 无硬交期：客户催过的单（急单/尽快，priority=5）不能报「准时」
+        return "urgent_no_due" if (priority or 0) >= 5 else "ok"
     if planned_end > info["axis"]:
         return "delayed"
     if info["axis"] - planned_end < config.AT_RISK_MINUTES:
@@ -345,6 +352,7 @@ _STATUS_CN = {
     "ok": "准时",
     "delayed": "延期",
     "at_risk": "预警",
+    "urgent_no_due": "急单·无交期",              # 客户催过但没给硬交期
     "not_in_horizon": "未排入本周",
     "not_scheduled_in_horizon": "未排入本周",   # 兼容旧枚举
     "unplannable": "排不进",
@@ -398,7 +406,8 @@ def build_risk_rows(sched, clean, horizon, unplannable=None):
         if oid in unplan_by_order and qty_planned <= 0:
             qty_planned = 0
         st = decide_status(planned_end, order["due"], order["qty"],
-                           qty_planned, horizon)
+                           qty_planned, horizon,
+                           priority=order.get("priority"))
 
         bn_m, bn_seq, bn_op = per_order_bottleneck.get(oid, (None, None, None))
         delay_days = None
@@ -420,14 +429,70 @@ def build_risk_rows(sched, clean, horizon, unplannable=None):
             "qty": order["qty"],
             "qty_planned": qty_planned,
             "product": order["product"],
-            "action": _action_text(st, delay_days, bn_m, unplan_by_order.get(oid)),
+            "action": _action_text(st, delay_days, bn_m, unplan_by_order.get(oid),
+                                   clean, planned_end, horizon),
         })
     return rows
 
 
-def _action_text(st, delay_days, bn_m, unplan):
+def _machine_group(clean, mid):
+    """机台 → 所属机台组（用于查该组负荷/容量）。
+
+    一台机可能挂在多个工序下（CNC-03 = 铣/镗），取它在容量表里
+    真正有统计的那个组，避免拿到「镗」这种容量为 0 的别名。
+    """
+    if not clean or not mid:
+        return None
+    m = clean.get("machines", {}).get(mid)
+    if not m:
+        return None
+    cap = clean.get("capacity", {})
+    ops = list(m.get("ops") or [])
+    # 优先取有产能的组（CNC-03 同时挂「铣」和「镗」，镗容量为 0，不能拿它算利用率）
+    for g in ops:
+        if g in cap and (cap[g].get("window_minutes") or 0) > 0:
+            return g
+    for g in ops:
+        if g in cap:
+            return g
+    return ops[0] if ops else None
+
+
+def _group_util(clean, mid):
+    """返回 (组名, 利用率百分数, 是否真有产能缺口)；算不出来返回 (None, None, None)。
+
+    利用率 = 本组负荷 / 本组窗口容量，全部从 clean 里取，不硬编码任何机台或数值。
+    """
+    g = _machine_group(clean, mid)
+    if not g or not clean:
+        return None, None, None
+    cap = clean.get("capacity", {}).get(g, {})
+    window = cap.get("window_minutes") or 0
+    if window <= 0:
+        return g, None, None
+    load = clean.get("load", {}).get(g, 0.0)
+    gap = clean.get("gap", {}).get(g, 0.0)
+    return g, round(load / window * 100), gap > config.EPS
+
+
+def _action_text(st, delay_days, bn_m, unplan, clean=None,
+                 planned_end=None, horizon=None):
+    """给计划员的一句话建议。
+
+    【为什么分叉】原本文案一律写「启用闲置机台」，但钻组负荷 10,837 / 容量 11,520
+    （无缺口、也没有闲置钻床）时，卡在钻台的订单真实原因是上游车/铣没做完、
+    钻床在等。指错原因的建議等于错误信息，所以按该组到底有没有缺口分两种写法。
+    """
     if st == "delayed":
+        g, pct, has_gap = _group_util(clean, bn_m)
+        if has_gap is False and pct is not None:
+            return (f"卡在 {bn_m}：本组产能够（利用率 {pct}%），是上游工序排队；"
+                    f"缩短前道或调大 --lot-size")
         return f"卡在 {bn_m}：启用闲置机台 / 与客户协商延期 {delay_days:g} 天 / 调大 --lot-size"
+    if st == "urgent_no_due":
+        # 严禁编造交期日期：只说实际完工，让客户自己定哪天要
+        end_s = cal.fmt(planned_end, horizon) if (planned_end is not None and horizon) else "—"
+        return (f"无硬交期但客户催过；已排 {end_s} 完工，需回客户确认具体哪天要")
     if st == "at_risk":
         return "余量不足一个班次，建议提前确认物料与人员"
     if st in ("not_in_horizon", "not_scheduled_in_horizon"):
@@ -484,8 +549,10 @@ def write_risk_xlsx(rows, horizon, path):
     ws.append([])
     ws.append([f"合计 {len(rows)} 单",
                f"延期 {cnt.get('delayed',0)} / 预警 {cnt.get('at_risk',0)} / "
+               f"急单·无交期 {cnt.get('urgent_no_due',0)} / "
                f"未排入本周 {cnt.get('not_in_horizon',0)+cnt.get('not_scheduled_in_horizon',0)} / "
-               f"排不进 {cnt.get('unplannable',0)}"])
+               f"排不进 {cnt.get('unplannable',0)} / "
+               f"准时 {cnt.get('ok',0)}"])
     ws.cell(row=ws.max_row, column=1).font = Font(name=_FONT, size=9, bold=True)
     ws.cell(row=ws.max_row, column=2).font = Font(name=_FONT, size=9, bold=True)
 
@@ -496,10 +563,13 @@ def write_risk_xlsx(rows, horizon, path):
         "1. 「类型」含义：",
         "   · 延期       = 已排入且预计完工晚于交期",
         "   · 预警       = 已排入且余量不足一个班次",
+        "   · 急单·无交期 = 客户催过但没给硬交期，只能报预计完工，交期要回客户确认",
         "   · 未排入本周 = 交期在窗口之后，本周不排，不算延期",
         "   · 排不进     = 受产能或流水约束无法安排，需决策",
         "2. 带 * 的交期为推算值（如「月底前」→ 当月末），非客户原始承诺。",
         "3. 「卡在哪个工序」指该订单最后完工的那道工序。",
+        "4. 「建议动作」按该机台所属组到底缺不缺产能分两种写法："
+        "缺产能才提「启用闲置机台」，产能够的是上游排队。",
     ]:
         ws.append([line])
         ws.cell(row=ws.max_row, column=1).font = Font(name=_FONT, size=9)

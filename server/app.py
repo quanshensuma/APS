@@ -205,10 +205,17 @@ def _jsonable(obj):
     return obj
 
 
-def run_pipeline(xlsx_path: str, payload: dict, want_files: bool = True) -> dict:
-    """读台账 → 清洗 → 实例 → 排程 → 校验 → 出产物。返回 API 响应体。"""
+def run_pipeline(xlsx_path: str, payload: dict, want_files: bool = True,
+                 display_name: str = None) -> dict:
+    """读台账 → 清洗 → 实例 → 排程 → 校验 → 出产物。返回 API 响应体。
+
+    display_name：给计划员看的台账文件名。上传路径在临时目录里叫
+    upload-xxxx.xlsx，直接写进交接说明会露出无意义的随机串，所以由
+    调用方传原始文件名（浏览器上传时的 name）。
+    """
     import datetime as _dt
     t0 = _dt.datetime.now()
+    src_name = display_name or os.path.basename(xlsx_path)
 
     # ---- 1. 读 ----
     try:
@@ -274,7 +281,7 @@ def run_pipeline(xlsx_path: str, payload: dict, want_files: bool = True) -> dict
             txt = checker.format_report(
                 rep, horizon, pline,
                 {"generated_at": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                 "source": os.path.basename(xlsx_path),
+                 "source": src_name,
                  "ops_total": len(ops), "ops_planned": len(sched)})
             files += ["体检报告.md"]
 
@@ -305,10 +312,10 @@ def run_pipeline(xlsx_path: str, payload: dict, want_files: bool = True) -> dict
             from core import handover as _handover, confirm as _confirm
             _handover.write_handover_md(
                 clean, horizon, rep, os.path.join(OUT_DIR, "交接说明.md"),
-                opts, risk_rows, os.path.basename(xlsx_path), stale_archived)
+                opts, risk_rows, src_name, stale_archived)
             _confirm.write_confirm_md(
                 clean, horizon, rep, os.path.join(OUT_DIR, "需求确认单.md"),
-                opts, risk_rows, os.path.basename(xlsx_path))
+                opts, risk_rows, src_name)
             files += ["交接说明.md", "需求确认单.md"]
 
             _dump(os.path.join(OUT_DIR, "clean.json"),
@@ -370,6 +377,8 @@ def _build_response(clean, horizon, sched, unplan, ev, res, rep,
         "makespan_days": ev["makespan_days"],
         "delayed_count": cnt.get("delayed", 0),
         "at_risk_count": cnt.get("at_risk", 0),
+        # 急单·无交期：客户催过但没给硬交期，不能报「准时」
+        "urgent_no_due_count": cnt.get("urgent_no_due", 0),
         # 【新枚举 not_in_horizon + 旧名 not_scheduled_in_horizon 都要算】
         # report.py 已把状态改名为 not_in_horizon（旧名留着兼容），这里只查旧名会漏成 0，
         # 导致界面「未排入本周 0」与风险清单/校验报告的 6 条对不上。
@@ -708,7 +717,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             with open(tmp_path, "wb") as f:
                 f.write(data)
-            result = run_pipeline(tmp_path, payload, want_files=True)
+            result = run_pipeline(tmp_path, payload, want_files=True,
+                                  display_name=filename)
             return self._send_json(result)
         except ApiError as e:
             return self._send_error_json(e.code, e.msg, e.hint)
