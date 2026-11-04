@@ -87,7 +87,7 @@ class VerifyReport:
     h3: RuleResult
     h4: RuleResult
     h5: RuleResult
-    result: str                 # "PASS" | "PASS_WITH_SKIP" | "FAIL"
+    result: str                 # "PASS" | "PASS_WITH_SKIP" | "PASS_WITH_WARN" | "FAIL"
     def ok(self) -> bool: return self.result != "FAIL"
 ```
 
@@ -112,7 +112,7 @@ def decide_result(report) -> str:
 
 ---
 
-## C2. 五条约束的判定
+## C2. 五条校验项的判定（H1~H4 硬约束 + H5 附加条件）
 
 ### C2.1 H1 · 每道工序恰好一次
 
@@ -517,7 +517,7 @@ def test_checker_catches_h5_violation():
 
 | 任务书 N4 验收标准 | 本设计对应 |
 |---|---|
-| ☐ 校验器 0 违反 | C1.1 `result == "PASS"` |
+| ☐ 校验器 0 违反 | 硬约束 H1~H4 全过，判定为 `PASS` / `PASS_WITH_SKIP` / `PASS_WITH_WARN` 之一。H5 未达成 → `PASS_WITH_WARN`，仍可交付 |
 | ☐ 故意造一个撞机，能抓出来 | C5.2 测试 2 + V08/V09 |
 | 红线：校验器让 AI 生成或判断 → 0 分 | C0.1 三条原则 + C0.2 CI 断言 |
 | PPT 第 25 页「校验器 0 违反（不撞机、不重不漏、不倒序）」 | H1/H3/H4 |

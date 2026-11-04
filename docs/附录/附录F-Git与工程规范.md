@@ -268,9 +268,9 @@ python web\app.py --port 8765
 ### 看结果
 
 ```
-1. 先看 out/校验报告.txt 第一行的「结果：」
-   PASS / PASS_WITH_SKIP → 可以用
-   FAIL                  → 有问题，看下面逐条
+1. 先看 out/校验报告.txt 的「结果：」那一行
+   PASS / PASS_WITH_SKIP / PASS_WITH_WARN → 可以用（只有 FAIL 不能用）
+   FAIL                                   → 有问题，看下面逐条
 2. 再看 out/风险清单.xlsx
 3. 最后打印 out/排单表.xlsx
 ```

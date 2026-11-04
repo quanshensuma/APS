@@ -376,7 +376,7 @@ python web\app.py --port 8765   # 网页版也跑一次
 | 清洗类别 | 13 类（其中 5 类需客户确认） |
 | 工序数 | 49 |
 | makespan | _X.X_ 天（窗口 6 天） |
-| 校验结果 | PASS / PASS_WITH_SKIP |
+| 校验结果 | PASS / PASS_WITH_SKIP / PASS_WITH_WARN（三者均可用，仅 FAIL 不可交付） |
 | 迟到单数 | _N_ |
 | 耗时 | _0.7_ 秒 |
 
