@@ -541,7 +541,9 @@
 
     if (R.risk && R.risk.totals) {
       var badgeRisk = $('#tabBadgeRisk');
-      badgeRisk.textContent = (R.risk.totals.delayed || 0) + (R.risk.totals.atRisk || 0);
+      // 急单·无交期也算「要回电话」的单，一起进徽标；延期优先染红
+      badgeRisk.textContent = (R.risk.totals.delayed || 0) + (R.risk.totals.atRisk || 0)
+        + (R.risk.totals.urgentNoDue || 0);
       badgeRisk.className = 'tab-badge' + (R.risk.totals.delayed > 0 ? ' hot' : (R.risk.totals.atRisk > 0 ? ' info' : ''));
     }
     if (R.verify) {
@@ -1002,6 +1004,7 @@
       { key: 'all', label: '全部', n: rows.length },
       { key: 'delayed', label: '🔴 延期', n: t.delayed },
       { key: 'at_risk', label: '🟡 预警', n: t.atRisk },
+      { key: 'urgent_no_due', label: '🟠 急单·无交期', n: t.urgentNoDue },
       { key: 'not_in_horizon', label: '⚪ 未排入本周', n: t.notInHorizon },
       { key: 'unplannable', label: '⚫ 排不进', n: t.unplannable },
       { key: 'ok', label: '🟢 准时', n: t.ok }
@@ -1034,7 +1037,7 @@
         '<td class="mono">' + (r.bottleneckMachine ? '<b>' + esc(r.bottleneckMachine) + '</b>' : '—') + '</td>' +
         '<td>' + esc(r.bottleneckOp || '—') + '</td>' +
         '<td class="num">' + qtyLabel(r) + '</td>' +
-        '<td class="wrap">' + esc(r.suggestion) + '</td>' +
+        '<td class="wrap risk-suggestion">' + esc(r.suggestion) + '</td>' +
         '</tr>';
     }).join('');
 
@@ -1044,6 +1047,7 @@
         '<span>合计 <b>' + rows.length + '</b> 张</span>' +
         '<span>延期 <b>' + t.delayed + '</b></span>' +
         '<span>预警 <b>' + t.atRisk + '</b></span>' +
+        '<span>急单·无交期 <b>' + (t.urgentNoDue || 0) + '</b></span>' +
         '<span>未排入本周 <b>' + t.notInHorizon + '</b></span>' +
         '<span>排不进 <b>' + t.unplannable + '</b></span>' +
         '<span>准时 <b>' + t.ok + '</b></span>' +
@@ -1195,21 +1199,19 @@
       return;
     }
 
-    // 真实后端契约：handover 只是产物描述，正文在那个 md 文件里
+    // 真实后端契约：handover 只是产物描述，正文在那个 md 文件里。
+    // F3 要求「该段落在面板里正常显示」→ 主动取回 md 正文再渲染，而不是只给下载链接。
     if (H.fileOnly) {
-      metaEl.textContent = '正文见文件';
+      metaEl.textContent = '正在载入正文…';
       toggle.hidden = true;
       bodyEl.innerHTML =
-        '<div class="ho-intro">' +
-        '后端已生成交接说明文件，正文在里面（含怎么重跑 / 假设 / 局限 / 什么条件下不能信）。' +
-        '双击下载或在浏览器里查看即可，这里不再重复排版一遍。' +
-        '</div>' +
+        '<div class="ho-intro" id="hoLoading">正在从服务端载入交接说明正文…</div>' +
         '<div class="ho-downloads">' +
         (H.files.md
-          ? '<a class="btn btn-primary btn-sm" href="' + esc(H.files.md) + '" download>下载交接说明（md）</a>' +
-            '<a class="btn btn-ghost btn-sm" href="' + esc(H.files.md) + '" target="_blank" rel="noopener">在浏览器里看</a>'
-          : '<span class="muted">后端未给下载链接</span>') +
+          ? '<a class="btn btn-ghost btn-sm" href="' + esc(H.files.md) + '" download>下载交接说明（md）</a>'
+          : '') +
         '</div>';
+      loadHandoverText(H.files.md, bodyEl, metaEl, u);
       return;
     }
 
@@ -1245,6 +1247,79 @@
     }
   }
 
+  /**
+   * 从后端取回交接说明 md 正文并渲染。
+   * 只做「取文本 + 按标题切段 + 简易 markdown」，不生成任何内容。
+   * 取不到就退回「下载查看」，不抛错、不白屏。
+   */
+  function loadHandoverText(href, bodyEl, metaEl, u) {
+    if (!href) {
+      metaEl.textContent = '';
+      bodyEl.innerHTML = '<div class="empty"><span class="empty-icon">—</span>' +
+        '后端未提供交接说明下载链接。</div>';
+      return;
+    }
+    fetch(href, { method: 'GET' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.text();
+      })
+      .then(function (md) {
+        var sections = splitMarkdownSections(md);
+        if (!sections.length) {
+          // 没有二级标题就整段显示，别丢内容
+          sections = [{ title: '交接说明', body: md }];
+        }
+        metaEl.textContent = '共 ' + sections.length + ' 段';
+        var toggle = $('#btnHandoverToggle');
+        if (toggle) toggle.hidden = false;
+
+        bodyEl.innerHTML =
+          sections.map(function (s, i) {
+            return '<details class="ho-sec" ' + (i === 0 ? 'open' : '') + '>' +
+              '<summary>' + esc(s.title) + '</summary>' +
+              '<div class="ho-body">' + miniMarkdown(s.body) + '</div>' +
+              '</details>';
+          }).join('') +
+          '<div class="ho-downloads">' +
+          '<a class="btn btn-ghost btn-sm" href="' + esc(href) + '" download>下载交接说明（md）</a>' +
+          '</div>';
+
+        if (toggle && toggle.getAttribute('data-bound') !== '1') {
+          toggle.setAttribute('data-bound', '1');
+          toggle.addEventListener('click', function () {
+            var anyOpen = $$('#handoverBody .ho-sec[open]').length > 0;
+            $$('#handoverBody .ho-sec').forEach(function (d) { d.open = !anyOpen; });
+          });
+        }
+      })
+      .catch(function (e) {
+        metaEl.textContent = '';
+        bodyEl.innerHTML = '<div class="empty"><span class="empty-icon">—</span>' +
+          '正文载入失败（' + esc(e.message || '网络错误') + '）。' +
+          '<br><span class="muted">可直接下载交接说明查看。</span></div>' +
+          '<div class="ho-downloads"><a class="btn btn-ghost btn-sm" href="' + esc(href) + '" download>下载交接说明（md）</a></div>';
+      });
+  }
+
+  /** 按 markdown 二级标题（## / ### 中文序号）切段；标题行作为段落名 */
+  function splitMarkdownSections(md) {
+    var lines = str(md).split(/\r?\n/);
+    var out = [], cur = null;
+    lines.forEach(function (ln) {
+      var m = ln.match(/^\s{0,3}(#{1,4})\s+(.+?)\s*$/);
+      if (m) {
+        if (cur && cur.body.trim()) out.push(cur);
+        cur = { title: m[2].replace(/[*`]/g, '').trim(), body: '' };
+        return;
+      }
+      if (!cur) cur = { title: '概述', body: '' };
+      cur.body += ln + '\n';
+    });
+    if (cur && cur.body.trim()) out.push(cur);
+    // 去掉空标题段的空行
+    return out.filter(function (s) { return s.title || s.body.trim(); });
+  }
   function hasHandoverHtml(u) {
     var raw = u.raw || {};
     var h = raw.handover || {};
@@ -1283,12 +1358,11 @@
       metaEl.textContent = '正文见文件';
       bodyEl.innerHTML =
         '<div class="cf-block">' +
-        '<h4>需求确认单已生成</h4>' +
-        '<div class="cf-none">后端已生成「需求确认单.md」，四块内容（我理解的三件事 / 客户不要的 / 问答 / 未确认事项）都在该文件里。</div>' +
+        '<h4>需求确认单</h4>' +
+        '<div id="cfLoading" class="cf-none">正在从服务端载入需求确认单正文…</div>' +
         '<div class="ho-downloads">' +
         (C.file && C.file.md
-          ? '<a class="btn btn-primary btn-sm" href="' + esc(C.file.md) + '" download>下载需求确认单（md）</a>' +
-            '<a class="btn btn-ghost btn-sm" href="' + esc(C.file.md) + '" target="_blank" rel="noopener">在浏览器里看</a>'
+          ? '<a class="btn btn-ghost btn-sm" href="' + esc(C.file.md) + '" download>下载需求确认单（md）</a>'
           : '<span class="muted">后端未给下载链接</span>') +
         '</div></div>' +
         (U.items && U.items.length
@@ -1298,6 +1372,26 @@
                 '<span class="cw-tail">' + esc(it.effective || '已按此口径计算') + '</span></div>';
             }).join('') + '</div>'
           : '');
+      // 正文同样取回来渲染（与交接说明一致的做法）
+      if (C.file && C.file.md) {
+        fetch(C.file.md, { method: 'GET' })
+          .then(function (r) { return r.ok ? r.text() : Promise.reject(new Error('HTTP ' + r.status)); })
+          .then(function (md) {
+            var secs = splitMarkdownSections(md);
+            var html = secs.map(function (s, i) {
+              return '<details class="ho-sec" ' + (i === 0 ? 'open' : '') + '>' +
+                '<summary>' + esc(s.title) + '</summary>' +
+                '<div class="ho-body">' + miniMarkdown(s.body) + '</div></details>';
+            }).join('');
+            var node = $('#cfLoading');
+            if (node) node.outerHTML = html || '<div class="cf-none">正文为空</div>';
+            metaEl.textContent = '共 ' + secs.length + ' 段';
+          })
+          .catch(function (e) {
+            var node = $('#cfLoading');
+            if (node) node.textContent = '正文载入失败（' + (e.message || '网络错误') + '），可下载查看。';
+          });
+      }
       return;
     }
 

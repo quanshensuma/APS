@@ -261,7 +261,13 @@
     };
     var orderId = g(r.orderId, r.order_id, r.id);
     var status = g(r.status, r.type);
-    var statusCn = g(r.statusCn, r.type_cn) || STATUS_CN[status] || status || '';
+    /* 未知状态的兜底顺序：
+       ① 后端给了中文（statusCn / type_cn）→ 直接用
+       ② 本地映射表能认 → 用中文
+       ③ 都认不出 → 原样显示（不用英文码硬撑），并标成「其他」，
+          避免后端先落地新状态时前端显示空白或 status_code 英文。 */
+    var statusCn = g(r.statusCn, r.type_cn) || STATUS_CN[status] || '';
+    if (!statusCn) statusCn = status ? (STATUS_CN_OTHER + '（' + status + '）') : '';
     var due = g(r.due, r.dueMd);
     var plannedEnd = g(r.plannedEndLabel, r.planned_end, r.plannedEnd);
     var delayDays = g(r.delayDays, r.delay_days);
@@ -291,9 +297,13 @@
   }
 
   var STATUS_CN = {
-    delayed: '延期', at_risk: '预警', not_in_horizon: '未排入本周',
+    delayed: '延期', at_risk: '预警',
+    urgent_no_due: '急单·无交期',
+    not_in_horizon: '未排入本周',
     not_scheduled_in_horizon: '未排入本周', unplannable: '排不进', ok: '准时'
   };
+  /** 后端先落地了新状态、前端还不认识时的兜底中文前缀 */
+  var STATUS_CN_OTHER = '其他状态';
 
   /* ───────── 本地模式：engine.js 自算 ───────── */
   function runViaEngine(sheets, opts) {
@@ -421,22 +431,57 @@
         rows: (B.risks || []).map(normalizeRiskRow),
         totals: (function () {
           var m = B.metrics || {};
-          var pick = function () {
-            for (var i = 0; i < arguments.length; i++) {
+          var rows = (B.risks || []).map(normalizeRiskRow);
+          // 行数据兜底：后端没给某一类计数时，从风险行自己数（含新状态 urgent_no_due，
+          // 这样后端只落地状态、没加 count 字段时前端也不会显示 0）
+          var cnt = function (st) {
+            return rows.filter(function (r) {
+              var s = r.status || r.type;
+              return s === st || (st === 'not_in_horizon' && s === 'not_scheduled_in_horizon');
+            }).length;
+          };
+          var pick = function (fallback, skipAuto) {
+            for (var i = 1; i < arguments.length; i++) {
               if (arguments[i] != null) return arguments[i];
             }
-            return 0;
+            return skipAuto ? 0 : fallback;
           };
           return Object.assign({}, m, {
-            delayed: pick(m.delayed, m.delayed_count),
-            atRisk: pick(m.atRisk, m.at_risk_count),
-            notInHorizon: pick(m.notInHorizon, m.not_in_horizon_count),
-            unplannable: pick(m.unplannable, m.unplannable_count),
-            ok: pick(m.ok, m.ok_count, m.on_time_count)
+            delayed: pick(cnt('delayed'), m.delayed, m.delayed_count),
+            atRisk: pick(cnt('at_risk'), m.atRisk, m.at_risk_count),
+            urgentNoDue: pick(cnt('urgent_no_due'), m.urgentNoDue, m.urgent_no_due_count),
+            notInHorizon: pick(cnt('not_in_horizon'), m.notInHorizon, m.not_in_horizon_count),
+            unplannable: pick(cnt('unplannable'), m.unplannable, m.unplannable_count),
+            ok: pick(cnt('ok'), m.ok, m.ok_count, m.on_time_count)
           });
         })()
       },
-      operations: (B.schedule && B.schedule.operations) || [],
+      /* operations：后端 schedule 可能是蛇形字段的数组（order_id/lot_id/duration_min/
+         start_axis…），也可能是 {operations:[...]}。统一映射成前端驼峰形状，
+         否则排单表会整张空掉。 */
+      operations: (function () {
+        var raw = Array.isArray(B.schedule) ? B.schedule
+          : (B.schedule && B.schedule.operations) || [];
+        return raw.map(function (o) {
+          var sa = (o.startAxis != null) ? o.startAxis : o.start_axis;
+          var ea = (o.endAxis != null) ? o.endAxis : o.end_axis;
+          var st = o.start || '';
+          var en = o.end || '';
+          return Object.assign({}, o, {
+            orderId: o.orderId || o.order_id || '',
+            lotId: o.lotId || o.lot_id || o.orderId || o.order_id || '',
+            durationMin: (o.durationMin != null) ? o.durationMin : o.duration_min,
+            minPerUnit: (o.minPerUnit != null) ? o.minPerUnit : o.min_per_unit,
+            startAxis: sa, endAxis: ea,
+            startDate: o.startDate || st.slice(0, 10),
+            startTime: o.startTime || st.slice(11, 16),
+            endDate: o.endDate || en.slice(0, 10),
+            endTime: o.endTime || en.slice(11, 16),
+            seq: o.seq, op: o.op, product: o.product,
+            machine: o.machine, qty: o.qty, group: o.group
+          });
+        });
+      })(),
       unplannable: B.unplannable || [],
       capacity: B.capacity ? { groups: B.capacity, machines: [], totalLoad: 0, totalCapacity: 0 } : null,
       gantt: B.gantt || null,

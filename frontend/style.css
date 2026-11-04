@@ -530,10 +530,20 @@ tbody tr.is-hit td { background: #fff8e1 !important; }
 tbody tr.dim td { opacity: .38; }
 td.num, th.num { text-align: right; font-family: var(--mono); }
 td.mono { font-family: var(--mono); }
-td.wrap { white-space: normal; min-width: 140px; }
+td.wrap {
+  white-space: normal;
+  min-width: 220px;
+  max-width: 420px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+/* 风险表的「建议动作」列：文案可能很长（含利用率、原因、多个建议），
+   给足宽度并允许换行，避免撑破表格或出现横向滚动条。 */
+.risk-suggestion { min-width: 260px; max-width: 460px; }
 
 tr.row-delayed td:first-child { box-shadow: inset 3px 0 0 var(--red); }
 tr.row-atrisk td:first-child { box-shadow: inset 3px 0 0 var(--orange); }
+tr.row-urgent_no_due td:first-child { box-shadow: inset 3px 0 0 var(--orange); }
 tr.row-notin td:first-child { box-shadow: inset 3px 0 0 var(--grey); }
 tr.row-blocked td:first-child { box-shadow: inset 3px 0 0 var(--grey-dark); }
 tr.row-ok td:first-child { box-shadow: inset 3px 0 0 var(--green); }
@@ -548,6 +558,7 @@ tr.row-ok td:first-child { box-shadow: inset 3px 0 0 var(--green); }
 }
 .pill.delayed { background: var(--red-soft); color: #a83b37; }
 .pill.at_risk { background: var(--orange-soft); color: #8a5a15; }
+.pill.urgent_no_due { background: var(--orange-soft); color: #8a4a10; }
 .pill.not_in_horizon { background: #f0f2f5; color: var(--grey-dark); }
 .pill.unplannable { background: #e8eaed; color: #4c5259; }
 .pill.ok { background: var(--green-soft); color: #1e6a48; }

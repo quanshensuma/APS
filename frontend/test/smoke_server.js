@@ -205,7 +205,12 @@ async function run(withFields, realShape) {
         { order_id: 'HD-2026-106', type: 'not_in_horizon', type_cn: '未排入本周',
           due: '2026-11-20', planned_end: '2026-11-11 11:40', delay_days: null,
           bottleneck_machine: 'DRL-01', bottleneck_op: '钻', qty: 25,
-          action: '交期在窗口外，建议顺延下一窗口，本周不排' }
+          action: '交期在窗口外，建议顺延下一窗口，本周不排' },
+        // 新状态：急单·无交期（后端已落地，验证前端能吃下蛇形字段）
+        { order_id: 'HD-2026-103', type: 'urgent_no_due', type_cn: '急单·无交期',
+          due: null, planned_end: '11-18 10:30', delay_days: null,
+          bottleneck_machine: 'GRD-01', bottleneck_op: '磨', qty: 120,
+          action: '无硬交期但客户催过；已排 11-18 10:30 完工，需回客户确认具体哪天要' }
       ],
       scheduleArray: true
     });
@@ -222,14 +227,19 @@ async function run(withFields, realShape) {
           delayed: R.risk.totals.delayed,
           notInHorizon: R.risk.totals.notInHorizon,
           unplannable: R.risk.totals.unplannable,
-          ok: R.risk.totals.ok
+          ok: R.risk.totals.ok,
+          urgentNoDue: R.risk.totals.urgentNoDue
         },
         row0: {
           orderId: row0.orderId, statusCn: row0.statusCn,
           dueMd: row0.dueMd, plannedEndLabel: row0.plannedEndLabel,
           bottleneckMachine: row0.bottleneckMachine, bottleneckOp: row0.bottleneckOp,
           suggestion: row0.suggestion
-        }
+        },
+        urgentRow: (function () {
+          var x = (R.risk.rows || []).filter(function (y) { return y.status === 'urgent_no_due'; })[0];
+          return x ? { orderId: x.orderId, statusCn: x.statusCn, suggestion: x.suggestion } : null;
+        })()
       };
     });
     ok(r.opsPlanned === 65, 'schedule 是数组时 opsPlanned 仍为 65', r.opsPlanned);
@@ -239,6 +249,11 @@ async function run(withFields, realShape) {
     ok(r.t.notInHorizon === 6, '风险合计 未排入本周=6', r.t.notInHorizon);
     ok(r.t.unplannable === 1, '风险合计 排不进=1', r.t.unplannable);
     ok(r.t.ok === 3, '风险合计 准时=3（后端 ok_count）', r.t.ok);
+    ok(r.t.urgentNoDue === 1, '风险合计 急单·无交期=1（蛇形 urgent_no_due_count）', r.t.urgentNoDue);
+    ok(r.urgentRow && r.urgentRow.orderId === 'HD-2026-103', '急单·无交期行能取到', r.urgentRow && r.urgentRow.orderId);
+    ok(r.urgentRow && r.urgentRow.statusCn === '急单·无交期', '中文由 type_cn 兜底显示', r.urgentRow && r.urgentRow.statusCn);
+    ok(r.urgentRow && /需回客户确认/.test(r.urgentRow.suggestion || ''), '建议动作原样透传（前端不改写）',
+      r.urgentRow && (r.urgentRow.suggestion || '').slice(0, 30));
     ok(r.row0.orderId === 'HD-2026-101', '风险行 单号 不为空', r.row0.orderId);
     ok(r.row0.statusCn === '延期', '风险行 类型 不为空', r.row0.statusCn);
     ok(r.row0.plannedEndLabel !== '—' && !!r.row0.plannedEndLabel,

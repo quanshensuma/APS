@@ -84,10 +84,84 @@ function ok(cond, label, extra) {
   await page.click('.tab[data-tab="risk"]');
   await page.waitForTimeout(300);
   const chips = await page.locator('#riskFilters .chip').count();
-  ok(chips === 6, '六类筛选', chips);
+  ok(chips === 7, '七类筛选（新增「急单·无交期」）', chips);
   const delayedChip = await page.locator('#riskFilters .chip[data-filter="delayed"]').textContent();
   ok(/4/.test(delayedChip), '延期 4 张', delayedChip.replace(/\s+/g, ' '));
   await page.screenshot({ path: path.join(SHOT, '05-风险清单.png'), fullPage: true });
+
+  /* ── F1. 「急单·无交期」状态（后端 urgent_no_due 的前端呈现） ──
+     【为什么必测】HD-2026-103（客户催）与 HD-2026-105（尽快）原本被误判为「准时」，
+     客户最催的单显示绿色「准时」会让计划员直接回客户「没问题」。
+     这条是 PPT 第 9 页「回客户电话」的核心价值，必须有自动化守护。 */
+  console.log('\n=== F1. 急单·无交期（urgent_no_due）===');
+  const chipTexts = await page.locator('#riskFilters .chip').allTextContents();
+  const urgentIdx = chipTexts.findIndex(c => /急单·无交期/.test(c));
+  const warnIdx = chipTexts.findIndex(c => /预警/.test(c));
+  const nihIdx = chipTexts.findIndex(c => /未排入本周/.test(c));
+  ok(urgentIdx > -1, '存在「急单·无交期」筛选 chip', urgentIdx);
+  ok(urgentIdx > warnIdx && urgentIdx < nihIdx,
+    'chip 位置在「预警」之后、「未排入本周」之前',
+    '预警#' + warnIdx + ' 急单#' + urgentIdx + ' 未排入#' + nihIdx);
+  ok(/🟠/.test(chipTexts[urgentIdx] || ''), '用橙色标识（非红色）', chipTexts[urgentIdx]);
+  ok(/2/.test(chipTexts[urgentIdx] || ''), 'chip 计数为 2', chipTexts[urgentIdx]);
+
+  const riskRowTotal = await page.locator('#riskTable tbody tr').count();
+  ok(riskRowTotal === 14, '风险清单共 14 行', riskRowTotal);
+
+  await page.click('#riskFilters .chip[data-filter="urgent_no_due"]');
+  await page.waitForTimeout(350);
+  const urgentRows = await page.locator('#riskTable tbody tr').count();
+  ok(urgentRows === 2, '筛选后恰好 2 行', urgentRows);
+  const urgentIds = (await page.locator('#riskTable tbody tr td:first-child').allTextContents()).join(' ');
+  ok(/HD-2026-103/.test(urgentIds), '含 HD-2026-103（客户催，越早越好）', urgentIds.trim());
+  ok(/HD-2026-105/.test(urgentIds), '含 HD-2026-105（尽快）', urgentIds.trim());
+  const urgentTypes = await page.locator('#riskTable tbody tr td:nth-child(2)').allTextContents();
+  ok(urgentTypes.every(t => /急单·无交期/.test(t)), '类型列显示中文', urgentTypes.join(' / '));
+  ok(!urgentTypes.some(t => /urgent_no_due/.test(t)), '不把英文状态码暴露给用户');
+
+  // 配色必须是橙色系，不能和「延期」的红混为一谈
+  const pillBg = await page.locator('#riskTable tbody tr .pill.urgent_no_due').first()
+    .evaluate(el => getComputedStyle(el).backgroundColor).catch(() => '');
+  const redPillBg = await page.evaluate(() => {
+    const d = document.createElement('span'); d.className = 'pill delayed';
+    document.body.appendChild(d);
+    const c = getComputedStyle(d).backgroundColor; d.remove(); return c;
+  });
+  ok(pillBg && pillBg !== redPillBg, '配色不是延期红', 'urgent=' + pillBg + ' / delayed=' + redPillBg);
+
+  // 建议动作必须带实际完工日 + 「需回客户确认」，且不得编造交期
+  const urgentSugg = (await page.locator('#riskTable tbody tr td.risk-suggestion').allTextContents()).join(' ');
+  ok(/需回客户确认/.test(urgentSugg), '建议动作写明「需回客户确认」', urgentSugg.slice(0, 60).replace(/\s+/g, ' '));
+  ok(/\d{2}-\d{2}\s+\d{2}:\d{2}/.test(urgentSugg), '给出实际完工日期时间', (urgentSugg.match(/\d{2}-\d{2}\s+\d{2}:\d{2}/) || [''])[0]);
+  await page.screenshot({ path: path.join(SHOT, '13-急单无交期.png'), fullPage: true });
+
+  /* ── F2. 建议动作文案与机台产能是否对得上 ──
+     【为什么必测】曾有 bug：HD-2026-107 卡在 DRL-01（钻组利用率 94%，无缺口），
+     却给「启用闲置机台」的建议 —— 指错了原因，等于给计划员错误信息。 */
+  console.log('\n=== F2. 建议动作与机台产能一致性 ===');
+  await page.click('#riskFilters .chip[data-filter="all"]');
+  await page.waitForTimeout(350);
+  const allSugg = await page.locator('#riskTable tbody tr td.risk-suggestion').allTextContents();
+  const drlSugg = allSugg.filter(s => /DRL/.test(s));
+  ok(drlSugg.some(s => /产能够/.test(s)), '卡 DRL 的行写明「本组产能够」', (drlSugg[0] || '').slice(0, 50));
+  ok(!drlSugg.some(s => /启用闲置机台/.test(s)), '卡 DRL 的行不再误报「启用闲置机台」');
+  const grdSugg = allSugg.filter(s => /GRD-01/.test(s));
+  ok(grdSugg.some(s => /启用闲置机台/.test(s)), '卡 GRD-01（有缺口）仍提示「启用闲置机台」', (grdSugg[0] || '').slice(0, 40));
+  ok(allSugg.every(s => s.trim().length > 0), '没有空白建议动作');
+
+  // 长文案不能被裁切或撑破表格
+  const tblFit = await page.locator('#riskTable table').first().evaluate(el => {
+    const wrap = el.closest('.table-wrap') || el.parentElement || el;
+    return { sw: wrap.scrollWidth, cw: wrap.clientWidth };
+  });
+  ok(tblFit.sw <= tblFit.cw + 2, '表格无横向溢出', 'scrollW=' + tblFit.sw + ' clientW=' + tblFit.cw);
+  const clip = await page.locator('#riskTable tbody tr td.risk-suggestion').first().evaluate(el => {
+    const cs = getComputedStyle(el);
+    return { h: el.scrollHeight, ch: el.clientHeight, ov: cs.overflow };
+  });
+  ok(clip.ov === 'visible' || clip.h <= clip.ch + 2, '长文案未被裁切',
+    'scrollH=' + clip.h + ' clientH=' + clip.ch);
+  await page.screenshot({ path: path.join(SHOT, '14-建议动作长文案.png'), fullPage: true });
 
   // 点第一条延期行 → 应跳到排单表并高亮
   const firstRow = page.locator('#riskTable tbody tr').first();
@@ -99,7 +173,7 @@ function ok(cond, label, extra) {
   ok(hit >= 1, '排单表里该单被高亮（' + orderId + '）', hit + ' 行');
   await page.screenshot({ path: path.join(SHOT, '06-风险跳转排单.png'), fullPage: true });
 
-  console.log('\n=== F2. 校验页签：分组展示 ===');
+  console.log('\n=== F3. 校验页签：分组展示 ===');
   await page.click('.tab[data-tab="verify"]');
   await page.waitForTimeout(300);
   const vgroups = await page.locator('#verifyBody .hgroup').count();
@@ -118,7 +192,7 @@ function ok(cond, label, extra) {
   const firstGrpNote = await page.locator('#verifyBody .hgroup').first().locator('.verify-note').count();
   ok(firstGrpNote === 0, '硬约束分组下不加这句说明（只加在 H5 组）', firstGrpNote);
 
-  console.log('\n=== F3. H5 未达成不得拦截 ===');
+  console.log('\n=== F4. H5 未达成不得拦截 ===');
   ok(!(await page.locator('#btnExport').isDisabled()), 'H5 未达成时「下载全部」仍可点');
   ok(!(await page.locator('#btnPrint').isDisabled()), 'H5 未达成时「打印」仍可点');
   ok(await page.locator('#verifyBanner.warn').count() === 1, '顶部横幅是 warn（不是 fail）');
