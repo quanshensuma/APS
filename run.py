@@ -31,8 +31,10 @@ def parse_args(argv=None):
                     help="把磨工序视为机台组（不点名 GRD-01）")
     ap.add_argument("--enable-cnc03", action="store_true",
                     help="假设 CNC-03 已修复")
-    ap.add_argument("--allow-mill-substitute", action="store_true",
-                    help="允许阀体A 的铣削走其他立加（CNC-01/02）")
+    ap.add_argument("--allow-mill-substitute", action=argparse.BooleanOptionalAction,
+                    default=config.RunOptions.allow_mill_substitute,
+                    help="允许阀体A 的铣削走其他立加（CNC-01/02）。默认开（与前端一致），"
+                         "用 --no-allow-mill-substitute 关闭")
     ap.add_argument("--three-shift", action="store_true",
                     help="允许 LAT-03 三班（默认按两班）")
     # C3

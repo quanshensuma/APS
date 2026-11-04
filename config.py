@@ -150,7 +150,8 @@ class RunOptions:
     enable_grd02: bool = False       # Q1/Q6：是否允许用 GRD-02
     morning_as_group: bool = False   # Q6：磨是否视为机台组（不点名）
     enable_cnc03: bool = False       # Q2：是否假设 CNC-03 已恢复
-    allow_mill_substitute: bool = False  # Q2：阀体A 铣削是否允许走其他立加
+    allow_mill_substitute: bool = True   # Q2：阀体A 铣削是否允许走其他立加
+                                         # 【与前端对齐】engine.js DEFAULT_OPTS.allowSwap = true
     three_shift: bool = False        # A1：是否允许 LAT-03 三班
 
     # C3
