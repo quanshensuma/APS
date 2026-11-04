@@ -125,7 +125,7 @@ def _find_route_op(clean, product, seq):
 
 def _fmt(axis, horizon):
     """轴 → MM-DD HH:MM（给计划员看）。"""
-    from core import calendar as cal
+    from core import workcal as cal
     try:
         return cal.fmt(axis, horizon)
     except Exception:

@@ -1,7 +1,7 @@
 /**
  * 前后端一致性对比
- * 前端：web/engine.js（纯 JS 引擎）
- * 后端：web/app.py 的 /api/generate（Python 引擎）
+ * 前端：frontend/engine.js（纯 JS 引擎）
+ * 后端：server/app.py 的 /api/generate（Python 引擎）
  * 逐项比关键数字，任何不一致都打印出来。
  *
  * 运行：node test/parity_check.js
@@ -100,7 +100,7 @@ function post(port, fileBuf, filename, options) {
     B = await post(PORT, buf, '宏达精密_订单台账.xlsx', BE_OPTS);
   } catch (e) {
     console.log('后端连不上（' + HOST + ':' + PORT + '）：' + e.message);
-    console.log('请先启动：python web/app.py --port ' + PORT);
+    console.log('请先启动：python server/app.py --port ' + PORT);
     process.exitCode = 2;
     return;
   }

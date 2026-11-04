@@ -18,7 +18,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 import config
-from core import calendar as cal
+from core import workcal as cal
 
 
 # ============================================================

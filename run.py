@@ -15,7 +15,7 @@ import os
 import sys
 
 import config
-from core import calendar as cal
+from core import workcal as cal
 from core import cleaner, checker, instance, reader, report, solver
 
 

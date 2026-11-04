@@ -78,19 +78,30 @@ python tests/test_core.py
 ```
 aps-scheduler/
 ├── config.py          常驻配置（班次、日历、交期口径、机台、工艺路线）
-├── run.py             命令行入口
-├── core/
-│   ├── calendar.py    轴分钟 ↔ 挂钟时刻（跳过夜间和周日）
+├── run.py             命令行入口（后端，出四件产物）
+│
+├── core/              排程核心（纯 Python，不依赖 web）
+│   ├── workcal.py     轴分钟 ↔ 挂钟时刻（跳过夜间和周日）
 │   ├── reader.py      读三个 sheet（按表头名定位列）
 │   ├── cleaner.py     洗脏数据 + 体检记录 + 数据闸门
 │   ├── instance.py    订单 → 工序任务（分钟/件 × 数量）
 │   ├── checker.py     校验器（H1~H5，独立，不 import solver）
 │   ├── solver.py      规则排程（FIFO/SPT/MWKR 取最好）+ C3 子批流水
 │   └── report.py      四件产物
-├── web/               前端与服务（N5，待补）
-├── tests/             单测
-├── docs/              设计文档
-│   └── ui/            UI 稿（N3）
+│
+├── server/            本地服务（标准库 http.server，托管前端 + 3 个 API）
+│   └── app.py         python server/app.py --port 8801
+│
+├── frontend/          纯浏览器前端（零依赖，可双击 index.html）
+│   ├── index.html     页面骨架
+│   ├── app.js         界面逻辑（不计算，数字都来自 engine.js）
+│   ├── engine.js      纯 JS 排程引擎（与 core/ 口径对齐）
+│   ├── style.css      样式
+│   ├── xlsx-lite.js   纯前端 xlsx 解析
+│   └── test/          parity_check.js 前后端一致性对比
+│
+├── tests/             后端单测（test_core.py，46 条）
+├── docs/              设计文档（N2）
 ├── data/              客户台账（.gitignore 排除）
 └── out/               产物输出（.gitignore 排除）
 ```

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""core/calendar.py —— 工作日历换算。
+"""core/workcal.py —— 工作日历换算。
 
 【设计核心】轴（axis）是「只含可用时间」的分钟计数器：
     轴 0    = 第 1 个工作日 08:00

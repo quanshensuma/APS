@@ -15,7 +15,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
-from core import calendar as cal
+from core import workcal as cal
 from core import checker, cleaner, instance, solver
 
 # ============================================================

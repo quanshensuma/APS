@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import config
-from core import calendar as cal
+from core import workcal as cal
 from core import instance
 
 
