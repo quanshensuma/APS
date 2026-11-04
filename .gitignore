@@ -39,5 +39,10 @@ g2.json
 .DS_Store
 Thumbs.db
 
+# 开发工具依赖（playwright 19MB，不进仓库，需要时 npx playwright install）
+.devtools/
+node_modules/
+
 # 临时
 ~$*
+_tmp_*
