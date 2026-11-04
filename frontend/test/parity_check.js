@@ -145,14 +145,23 @@ function post(port, fileBuf, filename, options) {
   const feLines = (R.verify && R.verify.lines) || [];
   const feMap = {};
   feLines.forEach(l => { feMap[l.code] = l.ok; });
-  ['H1', 'H2', 'H3', 'H4', 'H5'].forEach(code => {
+  ['H1', 'H2', 'H3', 'H4'].forEach(code => {
     const fv = feMap[code];
     const bv = B.verify[code.toLowerCase()];
     const norm = v => (v === true || v === 'PASS' ? 'PASS' : 'FAIL');
-    cmp(code, norm(fv), norm(bv));
+    cmp(code + '（硬约束）', norm(fv), norm(bv));
   });
+  // H5 是客户流水条件，不是硬约束：只要两边「是否达成」一致即可
+  {
+    const fv = feMap['H5'];
+    const bv = B.verify.h5;
+    const norm = v => (v === true || v === 'PASS' ? '达成' : '未达成');
+    cmp('H5（流水条件，非硬约束）', norm(fv), norm(bv));
+  }
   const feOverall = R.verify && R.verify.result;
-  console.log('  · 前端总体: ' + feOverall + '  | 后端总体: ' + B.verify.result);
+  const beOverall = B.verify.result;
+  console.log('  · 前端总体: ' + feOverall + '  | 后端总体: ' + beOverall);
+  cmp('总体结论', feOverall, beOverall);
 
   // ---------- 5. 风险分类 ----------
   console.log('\n── 5. 风险清单分类 ──');

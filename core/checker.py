@@ -72,15 +72,32 @@ class VerifyReport:
         self.result = self._decide()
 
     def _decide(self):
-        rules = [self.h1, self.h2, self.h3, self.h4, self.h5]
-        if any(r.violations for r in rules):
+        """判定交付结论。
+
+        【口径】H5 是客户澄清的「流水条件」，不属于 PPT 第 12 页的四条硬约束。
+        硬约束 H1~H4 有违反 → FAIL，拒绝交付；
+        仅 H5 未达成 → PASS_WITH_WARN，排程可用但要讲清代价（与前端 engine.js 一致）。
+        """
+        hard = [self.h1, self.h2, self.h3, self.h4]
+        if any(r.violations for r in hard):
             return "FAIL"
-        if any(r.skipped for r in rules):
+        if self.h5.violations:
+            return "PASS_WITH_WARN"
+        if any(r.skipped for r in [self.h1, self.h2, self.h3, self.h4, self.h5]):
             return "PASS_WITH_SKIP"
         return "PASS"
 
     @property
+    def hard_violations(self):
+        return sum(len(r.violations) for r in [self.h1, self.h2, self.h3, self.h4])
+
+    @property
+    def soft_violations(self):
+        return len(self.h5.violations)
+
+    @property
     def ok(self):
+        # PASS_WITH_WARN 仍可交付：硬约束 0 违反即可签字
         return self.result != "FAIL"
 
     def all_violations(self):
@@ -417,11 +434,11 @@ def format_report(report: VerifyReport, horizon, params_line="", extra=None) -> 
         L.append(f"  未排入/无法校验 {skip_n} 项（详见下方）")
     L.append("")
     L.append("【逐条】")
-    for r in [report.h1, report.h2, report.h3, report.h4, report.h5]:
+    L.append("  ── 硬约束（PPT 第12页，违反则拒绝交付）──")
+    for r in [report.h1, report.h2, report.h3, report.h4]:
         mark = "✓" if r.passed else "✗"
         name = {"H1": "每道工序恰好一次", "H2": "机台与工时一致",
-                "H3": "工序不倒序", "H4": "同机台不重叠",
-                "H5": "阀芯C 流水 ≤30min"}[r.rule]
+                "H3": "工序不倒序", "H4": "同机台不重叠"}[r.rule]
         extra_txt = ""
         if r.rule == "H4":
             extra_txt = f"  {r.checked} 台机"
@@ -429,13 +446,24 @@ def format_report(report: VerifyReport, horizon, params_line="", extra=None) -> 
             extra_txt = f"  {r.checked} 项"
         elif r.rule == "H3":
             extra_txt = f"  {r.checked} 组"
-        elif r.rule == "H5":
-            extra_txt = f"  {r.checked} 个子批已校验"
         L.append(f"  {r.rule} {name:<20}{mark}{extra_txt}")
         for v in r.violations[:20]:
             L.append(f"      {v.message}")
         for s in r.skipped[:10]:
             L.append(f"      [SKIP] {s}")
+
+    L.append("")
+    L.append("  ── 客户流水条件（非硬约束，未达成不影响交付）──")
+    r = report.h5
+    mark = "✓" if r.passed else "✗"
+    L.append(f"  {r.rule} {'阀芯C 车→磨 流水 ≤30min':<20}{mark}  {r.checked} 个子批已校验")
+    for v in r.violations[:20]:
+        L.append(f"      {v.message}")
+    for s in r.skipped[:10]:
+        L.append(f"      [SKIP] {s}")
+    if r.violations:
+        L.append("      说明：磨床是瓶颈，产能客观不足导致断档，非排程算法错误。")
+        L.append("            硬约束 0 违反，排程可交付；此条须写进交接说明并告知客户代价。")
 
     if report.unplannable:
         L.append("")

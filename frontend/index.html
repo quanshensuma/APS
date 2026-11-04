@@ -182,6 +182,7 @@
       <button class="tab is-active" data-tab="gantt" role="tab">甘特图</button>
       <button class="tab" data-tab="orders" role="tab">排单表</button>
       <button class="tab" data-tab="risk" role="tab">交期风险<span class="tab-badge" id="tabBadgeRisk">0</span></button>
+      <button class="tab" data-tab="verify" role="tab">校验<span class="tab-badge" id="tabBadgeVerify">0</span></button>
       <button class="tab" data-tab="health" role="tab">数据体检<span class="tab-badge" id="tabBadgeHealth">0</span></button>
       <button class="tab" data-tab="capacity" role="tab">产能核对</button>
     </div>
@@ -229,6 +230,19 @@
         <p><b>未排入本周</b>：交期在窗口之后，本周不排，<b>不算延期</b>；带 * 的交期是推算值（如「月底前」→ 11-30）。</p>
         <p><b>排不进</b>：数量/工艺缺失，或产能与流水约束下无法安排，需要决策。</p>
       </div>
+    </section>
+
+    <!-- 校验（分组展示，与 out/校验报告.txt 同格式） -->
+    <section class="panel" data-panel="verify">
+      <div class="panel-head">
+        <h3>校验报告</h3>
+        <div class="panel-tools"><span class="muted" id="verifySummary"></span></div>
+      </div>
+      <p class="panel-note">
+        分两组看：<b>硬约束</b>（PPT 第12页四条，违反则拒绝交付）和<b>客户流水条件</b>（非硬约束，未达成不影响交付，但要讲清代价）。
+        这里只展示校验结果，不参与任何拦截——能否生成、能否下载与这一页无关。
+      </p>
+      <div id="verifyBody"></div>
     </section>
 
     <!-- 数据体检 -->

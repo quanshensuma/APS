@@ -801,6 +801,23 @@ tr.row-ok td:first-child { box-shadow: inset 3px 0 0 var(--green); }
   border-radius: 999px;
   padding: 1px 9px;
 }
+.hgroup-head .askflag.ok {
+  color: #1e6a48;
+  background: var(--green-soft);
+  border-color: #cfe9db;
+}
+/* H5 未达成时的固定说明条 */
+.verify-note {
+  margin: 4px 14px 12px;
+  padding: 10px 13px;
+  border-radius: 8px;
+  background: var(--orange-soft);
+  border: 1px solid #f5dcb4;
+  border-left: 3px solid var(--orange);
+  color: #8a5a15;
+  font-size: 12.5px;
+  line-height: 1.75;
+}
 .hitems { padding: 4px 0; }
 .hitem {
   display: grid;

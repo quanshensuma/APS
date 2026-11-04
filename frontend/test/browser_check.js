@@ -99,6 +99,34 @@ function ok(cond, label, extra) {
   ok(hit >= 1, '排单表里该单被高亮（' + orderId + '）', hit + ' 行');
   await page.screenshot({ path: path.join(SHOT, '06-风险跳转排单.png'), fullPage: true });
 
+  console.log('\n=== F2. 校验页签：分组展示 ===');
+  await page.click('.tab[data-tab="verify"]');
+  await page.waitForTimeout(300);
+  const vgroups = await page.locator('#verifyBody .hgroup').count();
+  ok(vgroups === 2, '校验区恰好两个分组', vgroups);
+  const vheads = await page.locator('#verifyBody .hgroup h4').allTextContents();
+  ok(vheads[0] === '硬约束', '第一组 = 硬约束', vheads.join(' / '));
+  ok(vheads[1] === '客户流水条件', '第二组 = 客户流水条件', vheads[1]);
+  const grpCodes = await page.locator('#verifyBody .hgroup').evaluateAll(els =>
+    els.map(e => Array.from(e.querySelectorAll('.hitem-loc')).map(x => x.textContent.trim())));
+  ok(grpCodes[0].slice(0, 4).join(',') === 'H1,H2,H3,H4', '硬约束组列出 H1~H4', grpCodes[0].slice(0, 4).join(','));
+  ok(grpCodes[1].some(c => c.startsWith('H5')), '流水条件组列出 H5', grpCodes[1][0]);
+  const flowNote = await page.locator('#verifyBody .verify-note').textContent();
+  ok(/磨床是瓶颈，产能客观不足导致断档/.test(flowNote), 'H5 分组下有固定说明', flowNote.slice(0, 30) + '…');
+  ok(/硬约束 0 违反，这份排程可以交/.test(flowNote), '固定说明含「可以交」口径');
+  ok(/必须写进交接说明并告知客户代价/.test(flowNote), '固定说明含交接要求');
+  const firstGrpNote = await page.locator('#verifyBody .hgroup').first().locator('.verify-note').count();
+  ok(firstGrpNote === 0, '硬约束分组下不加这句说明（只加在 H5 组）', firstGrpNote);
+
+  console.log('\n=== F3. H5 未达成不得拦截 ===');
+  ok(!(await page.locator('#btnExport').isDisabled()), 'H5 未达成时「下载全部」仍可点');
+  ok(!(await page.locator('#btnPrint').isDisabled()), 'H5 未达成时「打印」仍可点');
+  ok(await page.locator('#verifyBanner.warn').count() === 1, '顶部横幅是 warn（不是 fail）');
+  ok(await page.locator('#verifyBanner.fail').count() === 0, '顶部横幅没有 fail 样式');
+  const verifyBadge = await page.locator('#tabBadgeVerify').textContent();
+  ok(verifyBadge === '0', '校验页签徽标显示硬约束违规数 0', verifyBadge);
+  await page.screenshot({ path: path.join(SHOT, '05b-校验分组.png'), fullPage: true });
+
   console.log('\n=== G. 数据体检 ===');
   await page.click('.tab[data-tab="health"]');
   await page.waitForTimeout(300);
@@ -182,6 +210,20 @@ function ok(cond, label, extra) {
 
   console.log('\n=== N. 控制台错误 ===');
   ok(errors.length === 0, '无 JS 报错', errors.slice(0, 3).join(' | ') || '0 条');
+
+  console.log('\n=== O. 关掉流水约束后：校验区不应出现 H5 说明 ===');
+  await page.click('#btnBack');
+  await page.waitForTimeout(200);
+  await page.click('.seg[data-name="flowOn"] button[data-val="0"]');
+  await page.click('#btnRun');
+  await page.waitForSelector('#viewResult.is-active', { timeout: 20000 });
+  await page.waitForTimeout(500);
+  await page.click('.tab[data-tab="verify"]');
+  await page.waitForTimeout(300);
+  ok(await page.locator('#verifyBody .verify-note').count() === 0, '流水约束关闭时没有 H5 说明条');
+  ok(await page.locator('#verifyBanner.pass').count() === 1, '流水约束关闭后横幅转为 pass');
+  const vBadge2 = await page.locator('#tabBadgeVerify').textContent();
+  ok(vBadge2 === '0', '硬约束违规数仍为 0', vBadge2);
 
   await browser.close();
   console.log('\n结果：' + (fails ? '❌ ' + fails + ' 项失败' : '✅ 全部通过') + '\n');

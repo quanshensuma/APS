@@ -166,11 +166,17 @@ def main(argv=None) -> int:
     rep = checker.verify_all(ops, clean, horizon, opts, unplan)
 
     print("\n校验结果：")
-    for r in [rep.h1, rep.h2, rep.h3, rep.h4, rep.h5]:
+    for r in [rep.h1, rep.h2, rep.h3, rep.h4]:
         mark = "OK  " if r.passed else "FAIL"
         print(f"    {r.rule} {mark} 检查 {r.checked:>3} | 违规 {len(r.violations):>2} | "
               f"跳过 {len(r.skipped):>2}")
-    print(f"    → {rep.result}")
+    r5 = rep.h5
+    print(f"    H5 {'OK  ' if r5.passed else 'WARN'} 检查 {r5.checked:>3} | "
+          f"违规 {len(r5.violations):>2} | 跳过 {len(r5.skipped):>2}   "
+          f"[流水条件，非硬约束]")
+    print(f"    → {rep.result}"
+          + ("（硬约束 0 违反，排程可交付；H5 未达成须写进交接说明）"
+             if rep.result == "PASS_WITH_WARN" else ""))
 
     # 7. 写文件
     _ensure_dir(opts.out_dir)

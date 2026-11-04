@@ -422,12 +422,17 @@
     renderGantt(R);
     renderOrders(R);
     renderRisk(R);
+    renderVerify(R);
     renderHealth(R);
     renderCapacity(R);
 
     var badgeRisk = $('#tabBadgeRisk');
     badgeRisk.textContent = R.risk.totals.delayed + R.risk.totals.atRisk;
     badgeRisk.className = 'tab-badge' + (R.risk.totals.delayed > 0 ? ' hot' : (R.risk.totals.atRisk > 0 ? ' info' : ''));
+
+    var badgeVerify = $('#tabBadgeVerify');
+    badgeVerify.textContent = R.verify.hardViolations;
+    badgeVerify.className = 'tab-badge' + (R.verify.hardViolations > 0 ? ' hot' : '');
 
     var badgeHealth = $('#tabBadgeHealth');
     badgeHealth.textContent = R.health.counts.total;
@@ -788,6 +793,61 @@
     if (box) { box.value = ''; box.oninput && box.oninput.call(box); }
   }
 
+  /* ───────── 校验（分组展示，与 out/校验报告.txt 同格式） ─────────
+     本函数只读 R.verify 里已经算好的 groups / lines / flowNote，
+     不重算、不判断 gap，也不改变任何按钮状态。 */
+  function renderVerify(R) {
+    var V = R.verify;
+    var groups = V.groups || [];
+
+    $('#verifySummary').textContent = '总体：' + (V.resultCn || V.result) +
+      ' · 硬约束 0 违反 ' + (V.hardViolations === 0 ? '✓' : '✗ ' + V.hardViolations) +
+      (V.softViolations ? ' · 流水条件未达成 ' + V.softViolations + ' 个批次' : '');
+
+    if (!groups.length) {
+      $('#verifyBody').innerHTML = '<div class="empty"><span class="empty-icon">✓</span>没有可展示的校验项。</div>';
+      return;
+    }
+
+    $('#verifyBody').innerHTML = '<div class="health-grid">' + groups.map(function (g) {
+      var head = '<div class="hgroup-head">' +
+        '<span class="sev ' + (g.ok ? 'info' : (g.key === 'hard' ? 'block' : 'warn')) + '"></span>' +
+        '<h4>' + esc(g.title) + '</h4>' +
+        '<span class="count">' + esc(g.note) + '</span>' +
+        '<span class="askflag ' + (g.ok ? 'ok' : '') + '">' +
+        (g.ok ? '✓ 通过' : '✗ ' + g.failCount + ' 项未达成') + '</span>' +
+        '</div>';
+
+      var items = g.lines.map(function (l) {
+        var vs = (l.violations || []).map(function (v) {
+          return '<div class="hitem">' +
+            '<div class="hitem-loc">' + esc(l.code) + '</div>' +
+            '<div class="hitem-body"><div class="sym">' + esc(v.text) + '</div></div>' +
+            '</div>';
+        }).join('');
+        var skip = (l.skipped || []).map(function (s) {
+          return '<div class="hitem">' +
+            '<div class="hitem-loc">' + esc(l.code) + ' 跳过</div>' +
+            '<div class="hitem-body"><div class="sym muted">' + esc(s.text) + '</div></div>' +
+            '</div>';
+        }).join('');
+        return '<div class="hitem">' +
+          '<div class="hitem-loc">' + esc(l.code) + '</div>' +
+          '<div class="hitem-body">' +
+          '<div class="sym">' + (l.ok ? '<span class="pill ok">✓</span> ' : '<span class="pill delayed">✗</span> ') +
+          '<b>' + esc(l.name) + '</b>　<span class="muted">' + esc(l.detail) + '</span></div>' +
+          '</div></div>' + vs + skip;
+      }).join('');
+
+      /* H5 有违规时，在该分组下加一句固定说明（文案来自 engine.js 的 flowNote） */
+      var note = (g.key === 'flow' && !g.ok && V.flowNote)
+        ? '<div class="verify-note">' + esc(V.flowNote) + '</div>'
+        : '';
+
+      return '<div class="hgroup">' + head + '<div class="hitems">' + items + '</div>' + note + '</div>';
+    }).join('') + '</div>';
+  }
+
   /* ───────── 数据体检 ───────── */
   function renderHealth(R) {
     var H = R.health;
@@ -910,11 +970,14 @@
   $('#btnExport').addEventListener('click', function () {
     var R = state.result;
     if (!R) return;
+    // 注意：这里不检查 verify.result。H5 未达成（PASS_WITH_WARN）不得阻断下载，
+    // 只有硬约束 FAIL 时也照常允许导出——拦截职责在用人一方，不在展示层。
     var files = {
       '01_周排程表.csv': csvOperations(R),
       '02_交期风险清单.csv': csvRisk(R),
-      '03_数据体检报告.csv': csvHealth(R),
-      '04_产能核对.csv': csvCapacity(R)
+      '03_校验报告.csv': csvVerify(R),
+      '04_数据体检报告.csv': csvHealth(R),
+      '05_产能核对.csv': csvCapacity(R)
     };
     var names = Object.keys(files);
     if (names.length === 1) {
@@ -960,6 +1023,27 @@
     R.health.issues.forEach(function (i) {
       rows.push([i.title, ({ block: '阻断', warn: '警告', info: '提示' })[i.severity], i.locator, i.symptom, i.handling, i.askCustomer ? '是' : '否']);
     });
+    return csv(rows);
+  }
+
+  /** 校验报告：与 out/校验报告.txt 的两个分组同名同序，纯展示用 */
+  function csvVerify(R) {
+    var V = R.verify;
+    var rows = [['分组', '编号', '校验项', '结果', '明细', '未达成/违规']];
+    (V.groups || []).forEach(function (g) {
+      g.lines.forEach(function (l) {
+        rows.push([
+          g.title, l.code, l.name,
+          l.ok ? '通过' : '未达成',
+          l.detail,
+          (l.violations || []).map(function (v) { return v.text; }).join('；')
+        ]);
+      });
+      if (g.key === 'flow' && !g.ok && V.flowNote) {
+        rows.push(['', '', '说明', '', V.flowNote, '']);
+      }
+    });
+    rows.push(['总体结论', '', '', V.result, V.resultCn || '', '']);
     return csv(rows);
   }
 

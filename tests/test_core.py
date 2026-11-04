@@ -442,7 +442,11 @@ def test_S04_free_windows():
 # ============================================================
 
 def test_E1_end_to_end(tmp_path=None):
-    """用真实台账跑一遍，五条约束必须 PASS 或 PASS_WITH_SKIP。"""
+    """用真实台账跑一遍：硬约束 H1~H4 必须 0 违反。
+
+    H5 是客户流水条件（非硬约束）：
+      未达成 → PASS_WITH_WARN，仍可交付，但必须写进交接说明。
+    """
     import tempfile
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     xlsx = os.path.join(here, "data", "宏达精密_订单台账.xlsx")
@@ -460,8 +464,13 @@ def test_E1_end_to_end(tmp_path=None):
     # H1~H4 是硬约束，必须通过
     for r in (rep.h1, rep.h2, rep.h3, rep.h4):
         assert r.passed, f"{r.rule} 违规：" + str([v.message for v in r.violations][:3])
-    # H5（C3 流水）在磨床单台瓶颈下可能不满足，这是真实产能约束，允许 FAIL
-    assert rep.result in ("PASS", "PASS_WITH_SKIP", "FAIL")
+    # H5（C3 流水）在磨床单台瓶颈下可能不满足 —— 属于「流水条件未达成」，
+    # 判 PASS_WITH_WARN（硬约束 0 违反即可交付），不是 FAIL。
+    assert rep.result in ("PASS", "PASS_WITH_SKIP", "PASS_WITH_WARN")
+    assert rep.hard_violations == 0
+    if rep.h5.violations:
+        assert rep.result == "PASS_WITH_WARN"
+        assert rep.ok, "流水条件未达成不应阻断交付"
 
 
 def test_E2_duration_sum_handcheck():

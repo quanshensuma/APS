@@ -73,6 +73,29 @@ function ok(cond, label, extra) {
   ok(v.result === 'PASS_WITH_WARN', '校验结论（硬约束通过 + 流水条件未达成）', v.result + ' / ' + v.resultCn);
   ok(v.softViolations > 0, 'H5 确实报出了违规（磨床瓶颈的真实后果）', v.softViolations);
 
+  // ── 展示层分组：H1~H4 归「硬约束」，H5 归「客户流水条件」（与 out/校验报告.txt 同格式）──
+  console.log('\n=== 5b. 校验分组（展示层元数据）===');
+  const grp = {};
+  (v.groups || []).forEach(g => (grp[g.key] = g));
+  ok((v.groups || []).length === 2, '恰好两个分组', (v.groups || []).map(g => g.title).join(' / '));
+  ok(grp.hard && grp.hard.title === '硬约束', '分组一标题 = 硬约束', grp.hard && grp.hard.title);
+  ok(grp.flow && grp.flow.title === '客户流水条件', '分组二标题 = 客户流水条件', grp.flow && grp.flow.title);
+  ok(grp.hard.lines.map(l => l.code).join(',') === 'H1,H2,H3,H4',
+    '硬约束组只含 H1~H4', grp.hard.lines.map(l => l.code).join(','));
+  ok(grp.flow.lines.map(l => l.code).join(',') === 'H5', '流水条件组只含 H5', grp.flow.lines.map(l => l.code).join(','));
+  ok(grp.hard.ok === true && grp.hard.failCount === 0, '硬约束组判定通过', grp.hard.failCount);
+  ok(grp.flow.ok === false, '流水条件组判定未达成（展示用）', grp.flow.failCount);
+  const NOTE = '磨床是瓶颈，产能客观不足导致断档，不是排程算法错误；硬约束 0 违反，这份排程可以交，但这条必须写进交接说明并告知客户代价。';
+  ok(v.flowNote === NOTE, 'H5 未达成时给出固定说明文案（逐字一致）', v.flowNote.slice(0, 24) + '…');
+  ok(v.deliverable === true, '硬约束 0 违反 → 排程可交付（H5 不影响可交付性）', v.deliverable);
+
+  // 反向验证：H5 通过时不出现说明文案；关掉流水约束后整体应回到 PASS
+  const RflowOK = E.run(sheets, { flowOn: false });
+  ok(!RflowOK.verify.flowNote, '流水约束关闭时不出现说明文案', JSON.stringify(RflowOK.verify.flowNote));
+  ok(RflowOK.verify.result !== 'FAIL', '流水约束关闭后总体不因 H5 变成 FAIL', RflowOK.verify.result);
+  ok((RflowOK.verify.groups || []).every(g => g.ok), '流水约束关闭后两组都通过',
+    (RflowOK.verify.groups || []).map(g => g.title + ':' + g.ok).join(' / '));
+
   console.log('\n=== 6. 指标卡 / 风险清单 ===');
   R.cards.forEach(c => console.log('    ' + c.label.padEnd(8) + c.value.padStart(8) + '   ' + c.sub));
   ok(R.risk.totals.delayed >= 1, '至少 1 张延期单', R.risk.totals.delayed);

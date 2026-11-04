@@ -1035,12 +1035,40 @@
       PASS: '通过', PASS_WITH_SKIP: '通过（有未排入）',
       PASS_WITH_WARN: '硬约束通过 / 流水条件未达成', FAIL: '不通过'
     }[result];
+
+    /* 分组元数据：只描述「哪条属于哪组」，不做任何判定。
+       与后端 out/校验报告.txt 的两个分组标题逐字对应（core/checker.py format_report）。 */
+    var groups = [{
+      key: 'hard',
+      title: '硬约束',
+      note: 'PPT 第12页，违反则拒绝交付',
+      codes: ['H1', 'H2', 'H3', 'H4']
+    }, {
+      key: 'flow',
+      title: '客户流水条件',
+      note: '非硬约束，未达成不影响交付',
+      codes: ['H5']
+    }];
+    groups.forEach(function (g) {
+      g.lines = lines.filter(function (l) { return g.codes.indexOf(l.code) >= 0; });
+      g.ok = g.lines.every(function (l) { return l.ok; });
+      g.failCount = g.lines.reduce(function (a, l) { return a + l.violations.length; }, 0);
+    });
+    var flowGroup = groups.filter(function (g) { return g.key === 'flow'; })[0];
+
     return {
       result: result, resultCn: resultCn, lines: lines,
+      groups: groups,
       hardFail: hardFail, softFail: softFail,
+      /* 硬约束 0 违反 = 这份排程可以交付；H5 未达成只影响「要不要告知代价」，不影响可交付性。
+         前端任何地方都不得用 softFail 去禁用生成或阻断下载。 */
+      deliverable: !hardFail,
       violations: lines.reduce(function (a, l) { return a + l.violations.length; }, 0),
       hardViolations: lines.reduce(function (a, l) { return a + (l.code === 'H5' ? 0 : l.violations.length); }, 0),
-      softViolations: lines.reduce(function (a, l) { return a + (l.code === 'H5' ? l.violations.length : 0); }, 0)
+      softViolations: lines.reduce(function (a, l) { return a + (l.code === 'H5' ? l.violations.length : 0); }, 0),
+      flowNote: (flowGroup && !flowGroup.ok)
+        ? '磨床是瓶颈，产能客观不足导致断档，不是排程算法错误；硬约束 0 违反，这份排程可以交，但这条必须写进交接说明并告知客户代价。'
+        : ''
     };
   }
 
