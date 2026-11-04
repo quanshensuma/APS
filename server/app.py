@@ -55,6 +55,8 @@ ALLOWED_DOWNLOADS = {
     "风险清单.xlsx": "风险清单.xlsx",
     "体检报告.md": "体检报告.md",
     "校验报告.txt": "校验报告.txt",
+    "交接说明.md": "交接说明.md",
+    "需求确认单.md": "需求确认单.md",
     "schedule.json": "schedule.json",
     "clean.json": "clean.json",
 }
@@ -107,6 +109,76 @@ def opts_from_payload(payload: dict):
 # ============================================================
 # 业务：跑一遍全流程，返回 JSON
 # ============================================================
+
+
+RESULT_CN = {
+    "PASS": "通过，可以用",
+    "PASS_WITH_WARN": "硬约束通过 / 流水条件未达成，可交付但须说明代价",
+    "PASS_WITH_SKIP": "通过（有未排入）",
+    "FAIL": "未通过，不可交付",
+}
+
+ARTIFACT_META = {
+    "排单表.xlsx": ("排单表", "这周每天每台机干什么，可打印贴墙"),
+    "甘特图.html": ("甘特图", "整周节奏，断网双击可看"),
+    "风险清单.xlsx": ("交期风险清单", "哪几单要赶不上、卡在哪台机"),
+    "体检报告.md": ("数据体检报告", "台账里哪些数不能用、为什么要问客户"),
+    "校验报告.txt": ("校验报告", "五条规则的逐条结论"),
+    "交接说明.md": ("交接说明", "下周怎么重跑、假设与局限"),
+    "需求确认单.md": ("需求确认单", "给客户签字用的一页纸"),
+    "clean.json": ("清洗结果", "中间产物，调试用"),
+    "schedule.json": ("排程结果", "中间产物，调试用"),
+}
+
+
+def _artifact(name, present):
+    """单件产物描述（含可下载 URL）。"""
+    if name not in present:
+        return {"name": name, "title": ARTIFACT_META.get(name, (name, ""))[0],
+                "desc": ARTIFACT_META.get(name, (name, ""))[1],
+                "available": False, "downloadUrl": None, "stale": False}
+    title, desc = ARTIFACT_META.get(name, (name, ""))
+    return {"name": name, "title": title, "desc": desc, "available": True,
+            "downloadUrl": "/api/download/" + urllib.parse.quote(name, safe=""),
+            "stale": False}
+
+
+def _artifacts(names, stale=False):
+    """产物清单。stale=True 时不给下载链接（不鼓励下载旧文件）。"""
+    out = []
+    for n in names or []:
+        title, desc = ARTIFACT_META.get(n, (n, ""))
+        out.append({
+            "name": n, "title": title, "desc": desc, "available": True,
+            "stale": bool(stale),
+            "downloadUrl": (None if stale
+                            else "/api/download/" + urllib.parse.quote(n, safe="")),
+        })
+    return out
+
+
+def _archive_stale(out_dir, names):
+    """把旧产物移到 out/_stale/（精确文件名，绝不用通配符）。"""
+    stale_dir = os.path.join(out_dir, "_stale")
+    moved = []
+    for name in names:
+        src = os.path.join(out_dir, name)
+        if not os.path.isfile(src):
+            continue
+        try:
+            os.makedirs(stale_dir, exist_ok=True)
+            dst = os.path.join(stale_dir, name)
+            if os.path.exists(dst):
+                import datetime as _dt3
+                stamp = _dt3.datetime.now().strftime("%Y%m%d-%H%M%S")
+                stem, ext = os.path.splitext(name)
+                dst = os.path.join(stale_dir, stem + "." + stamp + ext)
+            os.replace(src, dst)
+            moved.append(name)
+        except OSError:
+            continue
+    return moved
+
 
 class ApiError(Exception):
     def __init__(self, code: str, msg: str, hint: str = ""):
@@ -191,7 +263,9 @@ def run_pipeline(xlsx_path: str, payload: dict, want_files: bool = True) -> dict
 
     # ---- 6. 产物 ----
     files = []
+    stale_archived = []
     risk_rows = report.build_risk_rows(sched, clean, horizon, unplan)
+    STALE_TARGETS = ["排单表.xlsx", "甘特图.html", "风险清单.xlsx"]
     if want_files:
         _ensure(OUT_DIR)
         try:
@@ -202,8 +276,20 @@ def run_pipeline(xlsx_path: str, payload: dict, want_files: bool = True) -> dict
                 {"generated_at": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                  "source": os.path.basename(xlsx_path),
                  "ops_total": len(ops), "ops_planned": len(sched)})
+            files += ["体检报告.md"]
+
+            if not rep.ok:
+                stale_archived = _archive_stale(OUT_DIR, STALE_TARGETS)
+                txt += "\n\n【产物状态】\n"
+                txt += "  本次校验未通过，排单表 / 甘特图 / 风险清单【未生成】。\n"
+                if stale_archived:
+                    txt += "  上一版旧文件已归档到 _stale/：" + "、".join(stale_archived) + "\n"
+                    txt += "  请勿使用 _stale/ 里的文件交付。\n"
+                else:
+                    txt += "  out/ 下没有残留的旧产物。\n"
+
             _write(os.path.join(OUT_DIR, "校验报告.txt"), txt)
-            files += ["体检报告.md", "校验报告.txt"]
+            files += ["校验报告.txt"]
 
             if rep.ok:
                 report.write_schedule_xlsx(sched, clean, horizon,
@@ -213,7 +299,17 @@ def run_pipeline(xlsx_path: str, payload: dict, want_files: bool = True) -> dict
                                         risk_rows, opts)
                 report.write_risk_xlsx(risk_rows, horizon,
                                        os.path.join(OUT_DIR, "风险清单.xlsx"))
-                files += ["排单表.xlsx", "甘特图.html", "风险清单.xlsx"]
+                files += STALE_TARGETS
+
+            # 交接说明 + 需求确认单（B1 / B2）
+            from core import handover as _handover, confirm as _confirm
+            _handover.write_handover_md(
+                clean, horizon, rep, os.path.join(OUT_DIR, "交接说明.md"),
+                opts, risk_rows, os.path.basename(xlsx_path), stale_archived)
+            _confirm.write_confirm_md(
+                clean, horizon, rep, os.path.join(OUT_DIR, "需求确认单.md"),
+                opts, risk_rows, os.path.basename(xlsx_path))
+            files += ["交接说明.md", "需求确认单.md"]
 
             _dump(os.path.join(OUT_DIR, "clean.json"),
                   {"meta": clean["meta"], "orders": clean["orders"],
@@ -230,7 +326,7 @@ def run_pipeline(xlsx_path: str, payload: dict, want_files: bool = True) -> dict
 
     # ---- 7. 组装响应 ----
     return _build_response(clean, horizon, sched, unplan, ev, res, rep,
-                           risk_rows, pline, files, start, t0)
+                           risk_rows, pline, files, start, t0, stale_archived)
 
 
 def _read_a1_note(path):
@@ -245,7 +341,7 @@ def _read_a1_note(path):
 
 
 def _build_response(clean, horizon, sched, unplan, ev, res, rep,
-                    risk_rows, pline, files, start, t0):
+                    risk_rows, pline, files, start, t0, stale_archived=None):
     import datetime as _dt
 
     # 指标
@@ -274,8 +370,15 @@ def _build_response(clean, horizon, sched, unplan, ev, res, rep,
         "makespan_days": ev["makespan_days"],
         "delayed_count": cnt.get("delayed", 0),
         "at_risk_count": cnt.get("at_risk", 0),
-        "not_in_horizon_count": cnt.get("not_scheduled_in_horizon", 0),
+        # 【新枚举 not_in_horizon + 旧名 not_scheduled_in_horizon 都要算】
+        # report.py 已把状态改名为 not_in_horizon（旧名留着兼容），这里只查旧名会漏成 0，
+        # 导致界面「未排入本周 0」与风险清单/校验报告的 6 条对不上。
+        "not_in_horizon_count": (cnt.get("not_in_horizon", 0)
+                                 + cnt.get("not_scheduled_in_horizon", 0)),
         "unplannable_count": cnt.get("unplannable", 0),
+        # 【前端风险合计条要「准时 N」】风险清单里的 ok（准时）条数，之前没给，
+        # 界面只能显示「准时 0」，而实际有 3 张准时单。
+        "ok_count": cnt.get("ok", 0),
         "on_time_pct": round(on_time / len(timed) * 100, 1) if timed else 100.0,
         "bottleneck": bn,
         "bottleneck_load_pct": round(bn_pct, 1),
@@ -387,8 +490,29 @@ def _build_response(clean, horizon, sched, unplan, ev, res, rep,
             "violations": [v.to_dict() for v in rep.all_violations()],
             "skipped": (rep.h5.skipped if hasattr(rep.h5, "skipped") else []),
             "result": rep.result,
+            "resultCn": RESULT_CN.get(rep.result, rep.result),
             "ok": rep.ok,
+            "hardViolations": rep.hard_violations,
+            "softViolations": rep.soft_violations,
         },
+        "summary": {
+            "result": rep.result,
+            "resultCn": RESULT_CN.get(rep.result, rep.result),
+            "hardViolations": rep.hard_violations,
+            "softViolations": rep.soft_violations,
+            "delayed": metrics.get("delayed_count", 0),
+            "atRisk": metrics.get("at_risk_count", 0),
+            "notInHorizon": metrics.get("not_in_horizon_count", 0),
+            "unplannable": metrics.get("unplannable_count", 0),
+            "bottleneck": metrics.get("bottleneck"),
+            "bottleneckLoadPct": metrics.get("bottleneck_load_pct"),
+            "makespanDays": metrics.get("makespan_days"),
+            "utilizationPct": metrics.get("utilization_pct"),
+        },
+        "artifacts": _artifacts(files),
+        "staleArchived": _artifacts(stale_archived or [], stale=True),
+        "handover": _artifact("交接说明.md", files),
+        "confirm": _artifact("需求确认单.md", files),
         "files": files,
     }
 
@@ -451,7 +575,13 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"ok": False, "error_code": code,
                          "error_msg": msg, "hint": hint}, status)
 
-    def _send_file(self, path: str):
+    def _send_file(self, path: str, as_attachment: bool = True):
+        """发送文件。
+
+        【关键】as_attachment=False 用于前端静态资源（index.html / app.js / css）：
+        只有走 /api/download/ 的产物才加 Content-Disposition: attachment。
+        否则浏览器打开首页会变成「下载 index.html」，页面根本渲染不出来。
+        """
         if not os.path.isfile(path):
             self._send_error_json("FILE_NOT_FOUND", "文件不存在或已被清理",
                                   "请重新排程生成", 404)
@@ -464,7 +594,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Content-Disposition", content_disposition(name))
+        if as_attachment:
+            self.send_header("Content-Disposition", content_disposition(name))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
@@ -512,7 +643,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_error_json(
                 "NOT_FOUND", f"页面不存在：{path}",
                 "请访问 / 打开首页", 404)
-        return self._send_file(target)
+        # 静态资源必须「就地渲染」，不能加 attachment（否则首页变成下载）
+        return self._send_file(target, as_attachment=False)
 
     # ---------- POST ----------
     def do_POST(self):

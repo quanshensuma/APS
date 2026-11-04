@@ -16,7 +16,7 @@ import sys
 
 import config
 from core import workcal as cal
-from core import cleaner, checker, instance, reader, report, solver
+from core import cleaner, checker, confirm, handover, instance, reader, report, solver
 
 
 def parse_args(argv=None):
@@ -112,10 +112,17 @@ def main(argv=None) -> int:
     t0 = _dt.datetime.now()
 
     # 1. 读
+    STALE_TARGETS = ["排单表.xlsx", "甘特图.html", "风险清单.xlsx"]
     try:
         raw = reader.read_workbook(xlsx)
     except reader.APSError as e:
-        print(f"[数据错误] {e.message if hasattr(e,'message') else e}", file=sys.stderr)
+        msg = getattr(e, "message", str(e))
+        print(f"[数据错误] {msg}", file=sys.stderr)
+        if not args.dry_run:
+            # 数据读不进来 = 本次一定出不了新表，旧表必须归档，否则会被当成新版贴墙
+            moved = _early_abort_archive(opts.out_dir, STALE_TARGETS, msg)
+            if moved:
+                print(f"  旧产物已归档到 _stale/：" + "、".join(moved), file=sys.stderr)
         return 3
 
     if opts.verbose:
@@ -143,6 +150,10 @@ def main(argv=None) -> int:
             _ensure_dir(opts.out_dir)
             report.write_health_md(clean, horizon,
                                    None, os.path.join(opts.out_dir, "体检报告.md"), opts)
+            moved = _early_abort_archive(
+                opts.out_dir, STALE_TARGETS, "全部订单被数据闸门拦住，本次未生成排程")
+            if moved:
+                print(f"  旧产物已归档到 _stale/：" + "、".join(moved), file=sys.stderr)
         return 3
 
     # 4. 实例
@@ -192,23 +203,50 @@ def main(argv=None) -> int:
         return 0 if rep.ok else 1
 
     paths = {}
+    written, skipped, archived = [], [], []
+
+    # 7.1 体检报告：无论过不过都出
     paths["体检报告.md"] = report.write_health_md(
         clean, horizon, rep, os.path.join(opts.out_dir, "体检报告.md"), opts, sched)
+    written.append("体检报告.md")
+
+    # 7.2 校验未过：把三件旧产物归档，绝不留在原地冒充新版
+    if not rep.ok:
+        archived = _archive_stale(opts.out_dir, STALE_TARGETS)
+        skipped = list(STALE_TARGETS)
+        txt += ("\n\n【产物状态】\n"
+                "  本次校验未通过，排单表 / 甘特图 / 风险清单【未生成】。\n")
+        if archived:
+            txt += "  上一版旧文件已归档到 _stale/：" + "、".join(archived) + "\n"
+            txt += "  请勿使用 _stale/ 里的文件交付。\n"
+        else:
+            txt += "  out/ 下没有残留的旧产物。\n"
+
     paths["校验报告.txt"] = _write_text(
         os.path.join(opts.out_dir, "校验报告.txt"), txt)
+    written.append("校验报告.txt")
 
-    if not rep.ok:
-        print("\n[校验未过] 拒绝渲染排程表/甘特图/风险清单。", file=sys.stderr)
-        print(f"详见 {paths['校验报告.txt']}", file=sys.stderr)
-        return 1
-
+    # 7.3 三件排程产物：仅校验通过时写
     risk_rows = report.build_risk_rows(sched, clean, horizon, unplan)
-    paths["排单表.xlsx"] = report.write_schedule_xlsx(
-        sched, clean, horizon, os.path.join(opts.out_dir, "排单表.xlsx"), opts)
-    paths["甘特图.html"] = report.write_gantt_html(
-        sched, clean, horizon, os.path.join(opts.out_dir, "甘特图.html"), risk_rows, opts)
-    paths["风险清单.xlsx"] = report.write_risk_xlsx(
-        risk_rows, horizon, os.path.join(opts.out_dir, "风险清单.xlsx"))
+    if rep.ok:
+        paths["排单表.xlsx"] = report.write_schedule_xlsx(
+            sched, clean, horizon, os.path.join(opts.out_dir, "排单表.xlsx"), opts)
+        paths["甘特图.html"] = report.write_gantt_html(
+            sched, clean, horizon, os.path.join(opts.out_dir, "甘特图.html"), risk_rows, opts)
+        paths["风险清单.xlsx"] = report.write_risk_xlsx(
+            risk_rows, horizon, os.path.join(opts.out_dir, "风险清单.xlsx"))
+        written += STALE_TARGETS
+
+    # 7.4 交接说明 + 需求确认单
+    paths["交接说明.md"] = handover.write_handover_md(
+        clean, horizon, rep, os.path.join(opts.out_dir, "交接说明.md"),
+        opts, risk_rows, os.path.basename(xlsx), archived)
+    written.append("交接说明.md")
+
+    paths["需求确认单.md"] = confirm.write_confirm_md(
+        clean, horizon, rep, os.path.join(opts.out_dir, "需求确认单.md"),
+        opts, risk_rows, os.path.basename(xlsx))
+    written.append("需求确认单.md")
 
     if args.dump_json:
         paths["clean.json"] = _dump_json(
@@ -217,22 +255,108 @@ def main(argv=None) -> int:
             _jsonable({"operations": sched, "unplannable": unplan,
                        "eval": ev, "best_rule": res["best_rule"]}),
             os.path.join(opts.out_dir, "schedule.json"))
+        written += ["clean.json", "schedule.json"]
 
     elapsed = (_dt.datetime.now() - t0).total_seconds()
-    print(f"\n输出到 {opts.out_dir}/（{elapsed:.2f} 秒）：")
-    for k in ["排单表.xlsx", "甘特图.html", "风险清单.xlsx", "体检报告.md", "校验报告.txt"]:
-        print(f"    {paths.get(k, k)}")
 
-    # 风险摘要
-    from collections import Counter
-    cnt = Counter(r["status_cn"] for r in risk_rows)
-    print("\n风险摘要：" + " / ".join(f"{k} {v}" for k, v in cnt.items()))
+    # 7.5 打印清单：生成了哪几件、跳过哪几件、归档哪几件
+    print(f"\n输出到 {opts.out_dir}/（{elapsed:.2f} 秒）：")
+    print(f"  生成了 {len(written)} 件：")
+    for k in written:
+        print(f"    + {paths.get(k, k)}")
+    if skipped:
+        print(f"  跳过了 {len(skipped)} 件（校验未过）：")
+        for k in skipped:
+            print(f"    - {k}")
+    if archived:
+        print(f"  归档了 {len(archived)} 件旧文件 -> _stale/：")
+        for k in archived:
+            print(f"    ~ {os.path.join(opts.out_dir, '_stale', k)}")
+
+    if risk_rows:
+        from collections import Counter
+        cnt = Counter(r["status_cn"] for r in risk_rows)
+        print("\n风险摘要：" + " / ".join(f"{k} {v}" for k, v in cnt.items()))
+
+    if not rep.ok:
+        print("\n[校验未过] 排程三件未生成；结果见校验报告.txt", file=sys.stderr)
+        return 1
     return 0
 
 
 # ------------------------------------------------------------
 # 工具
 # ------------------------------------------------------------
+
+
+def _early_abort_archive(out_dir, names, reason):
+    """早期退出（数据读不进来 / 无可排订单）时归档旧产物，
+    并写一份说明性的校验报告，保证 out/ 的结论与产物集合一致。"""
+    if not os.path.isdir(out_dir):
+        return []
+    moved = _archive_stale(out_dir, names)
+    lines = [
+        "=" * 62,
+        "排程校验报告",
+        "生成时间：" + _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "=" * 62,
+        "",
+        "【产物状态】",
+        "  本次运行在数据阶段就中止了，排单表 / 甘特图 / 风险清单【未生成】。",
+        "  中止原因：" + reason,
+        "",
+    ]
+    if moved:
+        lines.append("  上一版旧文件已归档到 _stale/：" + "、".join(moved))
+        lines.append("  请勿使用 _stale/ 里的文件交付。")
+    else:
+        lines.append("  out/ 下没有残留的旧产物。")
+    lines += ["", "=" * 62, "结果：ABORTED（数据阶段中止）", "=" * 62]
+    try:
+        with open(os.path.join(out_dir, "校验报告.txt"), "w",
+                  encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError:
+        pass
+    return moved
+
+
+def _archive_stale(out_dir, names):
+    """把指定的旧产物移到 out/_stale/，返回实际归档的文件名列表。
+
+    【安全】绝不用通配符删除：
+      · 只处理传入的精确文件名
+      · 先打印绝对路径再动作
+      · 目标已存在时加时间戳，不覆盖
+      · 移动失败则退化为改名加 .stale 后缀，再失败就跳过并在报告里说明
+    """
+    stale_dir = os.path.join(out_dir, "_stale")
+    moved = []
+    for name in names:
+        src = os.path.join(out_dir, name)
+        if not os.path.isfile(src):
+            continue
+        abs_src = os.path.abspath(src)
+        try:
+            os.makedirs(stale_dir, exist_ok=True)
+            dst = os.path.join(stale_dir, name)
+            if os.path.exists(dst):
+                stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+                stem, ext = os.path.splitext(name)
+                dst = os.path.join(stale_dir, f"{stem}.{stamp}{ext}")
+            print(f"  归档：{abs_src}  ->  {os.path.abspath(dst)}")
+            os.replace(src, dst)
+            moved.append(name)
+        except OSError:
+            try:
+                alt = os.path.abspath(src + ".stale")
+                print(f"  归档失败，改为加后缀：{abs_src}  ->  {alt}")
+                os.replace(src, alt)
+                moved.append(name + ".stale")
+            except OSError as e:
+                print(f"  跳过（无法归档）：{abs_src} -- {e}", file=sys.stderr)
+    return moved
+
 
 def _ensure_dir(d):
     if d and not os.path.isdir(d):
