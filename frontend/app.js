@@ -46,6 +46,7 @@
       .replace(/"/g, '&quot;');
   }
   function n0(x) { return x == null ? '—' : String(Math.round(x)); }
+  function str(v) { return v == null ? '' : String(v); }
   function pct(x) { return (x * 100).toFixed(1) + '%'; }
 
   /** 弹一个中文错误（不白屏、不显示 Traceback） */
@@ -181,6 +182,8 @@
     state.sheets = null;
     state.uploadInfo = null;
     state.result = null;
+    state.unified = null;
+    invalidateArtifacts();      // 换文件即视为上一版作废：产物区清空、下载置灰
     setRunning(false);
     setStatus('正在读取文件…', 'run');
     $('#filepick').hidden = false;
@@ -365,48 +368,146 @@
   }
 
   /* ═══════════ 运行 ═══════════ */
+  /** 换文件 / 读取失败时：让上一版产物彻底不可用（防「这是这次的还是上次的」） */
+  function invalidateArtifacts() {
+    var box = $('#artifacts');
+    if (box) {
+      box.className = 'artifacts is-pending';
+      box.innerHTML = '';
+      box.hidden = true;
+    }
+    hideFreshness();
+    $('#btnExport').disabled = true;
+    $('#btnPrint').disabled = true;
+    $('#viewResult').classList.remove('is-active');
+  }
+
+  /* ═══════════ 生成 ═══════════ */
+  /** 每次点生成：先清空/置灰产物区，旧链接不可点（F3-1） */
+  function resetArtifactsForRun() {
+    var box = $('#artifacts');
+    box.className = 'artifacts is-pending';
+    box.innerHTML = '';
+    box.hidden = false;
+    $('#viewResult').classList.remove('is-active');
+  }
+
+  /** 失败态（F3-2）：错误条保留 + 产物区明确空态 + 归档入口（样式弱于正常下载） */
+  function renderArtifactsFailed(err, unified) {
+    var box = $('#artifacts');
+    box.className = 'artifacts is-failed';
+    box.hidden = false;
+
+    var stale = unified && unified.staleArchived;
+    var staleHtml = '';
+    if (stale) {
+      var files = stale.files || [];
+      staleHtml = '<div class="artifact-stale">' +
+        '<div class="as-head">上一版已归档，仅供追溯，请勿打印贴墙</div>' +
+        '<div class="as-body">' +
+        files.map(function (f) {
+          return '<a class="as-link" href="' + esc(f.href || f.url || '#') + '"' +
+            ' target="_blank" rel="noopener">仅查看：' + esc(f.name || f.label || '归档文件') + '</a>';
+        }).join('') +
+        (!files.length && stale.note ? '<span class="muted">' + esc(stale.note) + '</span>' : '') +
+        '</div></div>';
+    }
+
+    box.innerHTML =
+      '<div class="artifact-fail">' +
+      '<div class="af-icon">✕</div>' +
+      '<div class="af-main">' +
+      '<div class="af-title">本次未生成任何排程产物</div>' +
+      '<div class="af-sub">' + esc((err && (err.userMessage || err.message)) || '排程未完成') + '</div>' +
+      '</div></div>' + staleHtml;
+
+    hideFreshness();
+    $('#btnExport').disabled = true;
+    $('#btnPrint').disabled = true;
+  }
+
+  function hideFreshness() {
+    $('#freshness').hidden = true;
+  }
+
+  function showFreshness(unified) {
+    $('#freshness').hidden = false;
+    $('#freshTime').textContent = fmtTime(unified.generatedAt);
+    $('#freshSource').textContent = unified.sourceFile || '—';
+    $('#freshMode').textContent = unified.mode === 'server' ? '服务端计算（产物为后端生成）' : '浏览器本地计算';
+  }
+
+  function fmtTime(iso) {
+    if (!iso) return '—';
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return String(iso);
+    var p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+      ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+
   $('#btnRun').addEventListener('click', function () {
     if (!state.sheets || state.running) return;
     clearError();
     setRunning(true);
-    var stages = ['读取台账', '清洗脏数据', '建立工序实例', '规则排程', '独立校验', '生成报表'];
-    var i = 0;
-    setStatus('正在排程… ' + stages[0], 'run');
+    resetArtifactsForRun();          // F3-1：先把产物区清空/置灰
+    setStatus('正在排程… 读取台账', 'run');
 
-    // 让浏览器先把"排程中"画出来，再开始算
+    var opts = {
+      startDate: state.opts.startDate || null,
+      allowSwap: !!state.opts.allowSwap,
+      enableGrd02: !!state.opts.enableGrd02,
+      enableCnc03: !!state.opts.enableCnc03,
+      emptyQty: state.opts.emptyQty,
+      lotSize: state.opts.lotSize,
+      flowOn: !!state.opts.flowOn,
+      sourceFile: state.file ? state.file.name : '宏达精密_订单台账.xlsx'
+    };
+
     setTimeout(function () {
       var t0 = performance.now();
-      var res;
-      try {
-        res = ApsEngine.run(state.sheets, {
-          startDate: state.opts.startDate || null,
-          allowSwap: !!state.opts.allowSwap,
-          enableGrd02: !!state.opts.enableGrd02,
-          enableCnc03: !!state.opts.enableCnc03,
-          emptyQty: state.opts.emptyQty,
-          lotSize: state.opts.lotSize,
-          flowOn: !!state.opts.flowOn,
-          sourceFile: state.file ? state.file.name : '宏达精密_订单台账.xlsx'
+      var run = state.useServer
+        ? APSData.runViaServer(state.file, opts)
+        : APSData.runViaEngine(state.sheets, opts);
+
+      run.then(function (out) {
+        var ms = performance.now() - t0;
+        var unified = APSData.unify(out.mode, out.payload, {
+          fileName: state.file ? state.file.name : '',
+          now: new Date().toISOString()
         });
-      } catch (err) {
+        unified.R.__wall = ms;
+        state.result = unified.R;
+        state.unified = unified;
+        state.lastError = null;
+
         setRunning(false);
+        renderResult(unified);
+        setStatus('已生成：' + countOps(unified.R) + ' 道工序，用时 ' + (ms / 1000).toFixed(2) + ' 秒', 'ok');
+        $('#viewHome').classList.remove('is-active');
+        $('#viewResult').classList.add('is-active');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }).catch(function (err) {
+        setRunning(false);
+        state.lastError = err;
+        state.result = null;
+        state.unified = null;
+
         var title = err.title || '排程失败';
         var body = err.userMessage || err.message || '未知错误';
-        showError(title, esc(body) + '<br>数据没有被修改，可以换个台账或调整参数再试。', err.stack || '');
+        showError(title, esc(body) + '<br>本次没有生成任何产物；原始台账没有被修改。', err.stack || '');
         setStatus('排程失败：' + title, 'err');
-        return;
-      }
-      var ms = performance.now() - t0;
-      state.result = res;
-      state.result.__wall = ms;
-      setRunning(false);
-      renderResult(res);
-      setStatus('已生成：' + res.meta.counts.opsPlanned + ' 道工序，用时 ' + (ms / 1000).toFixed(2) + ' 秒', 'ok');
-      $('#viewHome').classList.remove('is-active');
-      $('#viewResult').classList.add('is-active');
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+        renderArtifactsFailed(err, state.lastUnifiedStale);
+      });
     }, 30);
   });
+
+  function countOps(R) {
+    if (!R) return 0;
+    if (R.meta && R.meta.counts && R.meta.counts.opsPlanned != null) return R.meta.counts.opsPlanned;
+    if (R.operations) return R.operations.length;
+    return 0;
+  }
 
   $('#btnBack').addEventListener('click', function () {
     $('#viewResult').classList.remove('is-active');
@@ -415,9 +516,15 @@
   });
 
   /* ═══════════ 渲染结果 ═══════════ */
-  function renderResult(R) {
-    $('#resultFile').textContent = R.meta.sourceFile;
+  function renderResult(unified) {
+    var R = unified.R;
+    state.result = R;
+    state.unified = unified;
+
+    $('#resultFile').textContent = unified.sourceFile || (R.meta && R.meta.sourceFile) || '';
+    showFreshness(unified);
     renderBanner(R);
+    renderArtifacts(unified);
     renderCards(R);
     renderGantt(R);
     renderOrders(R);
@@ -425,20 +532,189 @@
     renderVerify(R);
     renderHealth(R);
     renderCapacity(R);
+    renderHandover(unified);
+    renderConfirm(unified);
 
-    var badgeRisk = $('#tabBadgeRisk');
-    badgeRisk.textContent = R.risk.totals.delayed + R.risk.totals.atRisk;
-    badgeRisk.className = 'tab-badge' + (R.risk.totals.delayed > 0 ? ' hot' : (R.risk.totals.atRisk > 0 ? ' info' : ''));
+    // 成功态：产物可下载可打印（PASS_WITH_WARN 也不得禁用）
+    $('#btnExport').disabled = false;
+    $('#btnPrint').disabled = false;
 
-    var badgeVerify = $('#tabBadgeVerify');
-    badgeVerify.textContent = R.verify.hardViolations;
-    badgeVerify.className = 'tab-badge' + (R.verify.hardViolations > 0 ? ' hot' : '');
-
-    var badgeHealth = $('#tabBadgeHealth');
-    badgeHealth.textContent = R.health.counts.total;
-    badgeHealth.className = 'tab-badge' + (R.health.counts.askCustomer > 0 ? ' info' : '');
+    if (R.risk && R.risk.totals) {
+      var badgeRisk = $('#tabBadgeRisk');
+      badgeRisk.textContent = (R.risk.totals.delayed || 0) + (R.risk.totals.atRisk || 0);
+      badgeRisk.className = 'tab-badge' + (R.risk.totals.delayed > 0 ? ' hot' : (R.risk.totals.atRisk > 0 ? ' info' : ''));
+    }
+    if (R.verify) {
+      var badgeVerify = $('#tabBadgeVerify');
+      badgeVerify.textContent = R.verify.hardViolations;
+      badgeVerify.className = 'tab-badge' + (R.verify.hardViolations > 0 ? ' hot' : '');
+    }
+    if (R.health && R.health.counts) {
+      var badgeHealth = $('#tabBadgeHealth');
+      badgeHealth.textContent = R.health.counts.total;
+      badgeHealth.className = 'tab-badge' + (R.health.counts.askCustomer > 0 ? ' info' : '');
+    }
 
     switchTab('gantt');
+  }
+
+  /* ───────── F3 · 产物区 ─────────
+     五件产物：排单表 / 甘特图 / 交期风险清单 / 数据体检 / 交接说明。
+     本地模式这些是即时生成的 csv/md（点开即下载）；服务端模式优先后端给的 artifacts。 */
+  var ARTIFACT_DEFS = [
+    { key: 'orders', label: '周排单表', file: '01_周排程表.csv', hint: '打印贴墙用' },
+    { key: 'gantt', label: '甘特图', file: '02_甘特图.html', hint: '断网可双击打开' },
+    { key: 'risk', label: '交期风险清单', file: '03_交期风险清单.csv', hint: '回客户电话用' },
+    { key: 'health', label: '数据体检报告', file: '04_数据体检报告.csv', hint: '哪些数不能用' },
+    { key: 'handover', label: '交接说明', file: '05_交接说明.md', hint: '下周自己重跑' }
+  ];
+
+  function renderArtifacts(unified) {
+    var box = $('#artifacts');
+    var R = unified.R;
+    var beArt = pickArtifacts(unified);
+
+    var items = ARTIFACT_DEFS.map(function (d) {
+      var be = beArt[d.key] || beArt[d.file] || null;
+      // 服务端模式：后端说 available=false 或没有链接，就算没产出
+      var has;
+      if (unified.mode === 'server') has = !!(be && be.available && be.href);
+      else has = !!be || canBuildLocal(unified, d.key);
+      return { def: d, be: be, has: has };
+    });
+
+    var vtone = (R.verify && R.verify.result) || 'PASS';
+    box.className = 'artifacts is-ok';
+    box.innerHTML = '<div class="art-head">' +
+      '<h3>本次产物</h3>' +
+      '<span class="muted">共 ' + items.filter(function (x) { return x.has; }).length + ' 件</span>' +
+      (vtone === 'PASS_WITH_WARN'
+        ? '<span class="art-warnbar">硬约束 0 违反，可打印；流水条件未达成，须向客户说明代价</span>'
+        : '') +
+      '</div>' +
+      '<div class="art-grid">' + items.map(function (it) {
+        if (!it.has) {
+          return '<div class="art-card is-off">' +
+            '<div class="ac-name">' + esc(it.def.label) + '</div>' +
+            '<div class="ac-note">暂无（本次未产出）</div></div>';
+        }
+        var href = it.be ? (it.be.href || it.be.url || it.be.path || '') : '';
+        return '<div class="art-card">' +
+          '<div class="ac-name">' + esc(it.def.label) + '</div>' +
+          '<div class="ac-note">' + esc(it.def.hint) + '</div>' +
+          '<div class="ac-actions">' +
+          (href
+            ? '<a class="ac-btn" href="' + esc(href) + '" download="' + esc(it.be.name || it.def.file) + '">下载</a>'
+            : '<button class="ac-btn" type="button" data-art="' + esc(it.def.key) + '">下载</button>') +
+          '</div></div>';
+      }).join('') + '</div>';
+
+    // 本地模式下点按钮即时生成
+    $$('#artifacts .ac-btn[data-art]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        downloadLocalArtifact(unified, b.getAttribute('data-art'));
+      });
+    });
+  }
+
+  function pickArtifacts(u) {
+    var raw = u.raw || {};
+    var a = raw.artifacts || raw.files || {};
+    var m = {};
+    if (Array.isArray(a)) {
+      a.forEach(function (x) {
+        if (!x) return;
+        var entry = {
+          name: x.name || x.title || '',
+          href: x.downloadUrl || x.href || x.url || '',
+          stale: !!x.stale,
+          available: x.available !== false,
+          title: x.title || x.name || '',
+          desc: x.desc || ''
+        };
+        if (entry.name) m[entry.name] = entry;
+        var sem = keyOfArtifact(entry.name);
+        if (sem) m[sem] = entry;
+      });
+      return m;
+    }
+    Object.keys(a || {}).forEach(function (k) {
+      var x = a[k] || {};
+      m[k] = {
+        name: x.name || k, href: x.downloadUrl || x.href || x.url || '',
+        stale: !!x.stale, available: x.available !== false,
+        title: x.title || k, desc: x.desc || ''
+      };
+    });
+    return m;
+  }
+
+  /** 后端产物名 → 前端产物卡片的语义 key（真实契约：排单表.xlsx / 甘特图.html …） */
+  function keyOfArtifact(name) {
+    var n = str(name);
+    if (/排单|排程表/.test(n)) return 'orders';
+    if (/甘特/.test(n)) return 'gantt';
+    if (/风险/.test(n)) return 'risk';
+    if (/体检/.test(n)) return 'health';
+    if (/交接/.test(n)) return 'handover';
+    if (/需求确认/.test(n)) return 'confirm';
+    if (/校验/.test(n)) return 'verify';
+    return '';
+  }
+
+  function canBuildLocal(u, key) {
+    // 服务端模式：只认后端给的产物（有 href 才算有）
+    if (u.mode === 'server') return !!(u.R && u.R.verify);
+    if (key === 'handover') return !!(u.handover && !u.handover.fileOnly);
+    return !!(u.R && u.R.verify);
+  }
+
+  function downloadLocalArtifact(u, key) {
+    var R = u.R;
+    var text = '', name = '';
+    if (key === 'orders') { text = csvOperations(R); name = '01_周排程表.csv'; }
+    else if (key === 'risk') { text = csvRisk(R); name = '03_交期风险清单.csv'; }
+    else if (key === 'health') { text = csvHealth(R); name = '04_数据体检报告.csv'; }
+    else if (key === 'handover') { text = handoverMarkdown(u); name = '05_交接说明.md'; }
+    else if (key === 'gantt') {
+      text = ganttStandaloneHtml(R); name = '02_甘特图.html';
+      download(name, text, 'text/html;charset=utf-8');
+      return;
+    }
+    if (!text) return;
+    download(name, '\ufeff' + text);
+  }
+
+  /** 交接说明导出 md：内容全部来自后端返回，前端只拼标题与时间 */
+  function handoverMarkdown(u) {
+    if (!u.handover) return '';
+    var H = u.handover;
+    var L = [];
+    L.push('# 交接说明');
+    L.push('');
+    L.push('> ' + '换了一周的台账，这份说明里的参数和假设要跟着重跑才会更新');
+    L.push('');
+    L.push('- 数据源：' + (u.sourceFile || '—'));
+    L.push('- 生成时间：' + fmtTime(u.generatedAt));
+    L.push('');
+    if (H.intro) { L.push(H.intro); L.push(''); }
+    H.sections.forEach(function (s) {
+      L.push('## ' + s.title);
+      L.push('');
+      L.push(renderBlockText(s.body));
+      L.push('');
+    });
+    return L.join('\n');
+  }
+
+  function ganttStandaloneHtml(R) {
+    var wrap = $('#gantt');
+    var css = '';
+    try { css = $('#ganttCss') ? '' : ''; } catch (e) { css = ''; }
+    return '<!DOCTYPE html><meta charset="utf-8"><title>甘特图</title>' +
+      '<style>body{font-family:sans-serif;padding:20px;background:#f5f7fa}' +
+      '.gantt-canvas{border:1px solid #e3e8ef;border-radius:9px;overflow:auto;background:#fff}' +
+      '</style>' + (wrap ? wrap.innerHTML : '<p>无甘特数据</p>');
   }
 
   function renderBanner(R) {
@@ -460,7 +736,11 @@
     } else {
       main = '<b>五项校验全部通过</b>：' + R.meta.counts.opsPlanned + ' 道工序已排，0 违反。';
     }
-    var side = '已排 ' + R.meta.counts.opsPlanned + ' / ' + R.meta.counts.opsTotal + ' 道 · 规则「' + esc(R.meta.ruleCn) + '」 · ' + (R.__wall || R.meta.elapsed) + ' ms';
+    // 耗时取整：后端 elapsed_ms 是浮点（如 161.30000000074506），直接显示会露一长串小数
+    var ms = R.__wall || R.meta.elapsed;
+    ms = (ms == null || ms === '') ? '' : (' · ' + Math.round(Number(ms)) + ' ms');
+    var side = '已排 ' + R.meta.counts.opsPlanned + ' / ' + R.meta.counts.opsTotal + ' 道'
+      + ' · 规则「' + esc(R.meta.ruleCn || '—') + '」' + ms;
     $('#verifyBanner').className = 'banner ' + cls;
     $('#verifyBanner').innerHTML =
       '<span class="banner-icon">' + icon + '</span>' +
@@ -483,6 +763,13 @@
 
   function renderGantt(R) {
     var G = R.gantt;
+    // 后端模式可能只给 operations、不给前端用的 gantt 结构 → 降级为空态，不抛错
+    if (!G || !G.days || !G.machines) {
+      $('#gantt').innerHTML = '<div class="empty"><span class="empty-icon">▦</span>' +
+        '本次结果没有甘特图数据。' +
+        '<br><span class="muted">服务端模式请在产物区下载「甘特图.html」查看；离线模式会在这里直接绘制。</span></div>';
+      return;
+    }
     var days = G.days;
     var totalAxis = Math.max(G.windowAxis, G.makespan);
     var DAY_PX = 168;                  // 每天宽度（px），两班各 84
@@ -848,6 +1135,240 @@
     }).join('') + '</div>';
   }
 
+  /* ───────── F1 · 交接说明面板 ─────────
+     内容全部来自 unified.handover（后端返回），前端只排版。
+     缺字段 → 面板显示「暂无」，不抛错。 */
+  function renderBlockText(body) {
+    if (body == null) return '';
+    if (Array.isArray(body)) {
+      return body.map(function (x) { return '- ' + str(x); }).join('\n');
+    }
+    if (typeof body === 'object') {
+      return Object.keys(body).map(function (k) { return '- ' + k + '：' + str(body[k]); }).join('\n');
+    }
+    return str(body);
+  }
+
+  /** 极简 markdown：只支持 **粗体**、`代码`、- 列表、换行。不引任何库。 */
+  function miniMarkdown(text) {
+    var lines = str(text).split(/\r?\n/);
+    var out = [], inList = false;
+    lines.forEach(function (raw) {
+      var line = raw.replace(/\s+$/, '');
+      if (!line.trim()) {
+        if (inList) { out.push('</ul>'); inList = false; }
+        out.push('');
+        return;
+      }
+      var isLi = /^\s*[-*·]\s+/.test(line);
+      if (isLi) {
+        if (!inList) { out.push('<ul>'); inList = true; }
+        out.push('<li>' + inline(line.replace(/^\s*[-*·]\s+/, '')) + '</li>');
+        return;
+      }
+      if (inList) { out.push('</ul>'); inList = false; }
+      out.push('<p>' + inline(line) + '</p>');
+    });
+    if (inList) out.push('</ul>');
+    return out.join('\n');
+  }
+
+  function inline(s) {
+    return esc(s)
+      .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+      .replace(/`([^`]+)`/g, '<code>$1</code>');
+  }
+
+  function renderHandover(u) {
+    var H = u.handover;
+    var bodyEl = $('#handoverBody');
+    var metaEl = $('#handoverMeta');
+    var toggle = $('#btnHandoverToggle');
+
+    if (!H) {
+      metaEl.textContent = '';
+      toggle.hidden = true;
+      bodyEl.innerHTML = '<div class="empty"><span class="empty-icon">—</span>' +
+        '暂无交接说明内容（后端未返回 handover 字段）。' +
+        '<br><span class="muted">本地离线模式不产出交接说明；联机模式下由后端生成。</span></div>' +
+        '<div class="caliber-note" style="margin-top:14px">换了一周的台账，这份说明里的参数和假设要跟着重跑才会更新</div>';
+      return;
+    }
+
+    // 真实后端契约：handover 只是产物描述，正文在那个 md 文件里
+    if (H.fileOnly) {
+      metaEl.textContent = '正文见文件';
+      toggle.hidden = true;
+      bodyEl.innerHTML =
+        '<div class="ho-intro">' +
+        '后端已生成交接说明文件，正文在里面（含怎么重跑 / 假设 / 局限 / 什么条件下不能信）。' +
+        '双击下载或在浏览器里查看即可，这里不再重复排版一遍。' +
+        '</div>' +
+        '<div class="ho-downloads">' +
+        (H.files.md
+          ? '<a class="btn btn-primary btn-sm" href="' + esc(H.files.md) + '" download>下载交接说明（md）</a>' +
+            '<a class="btn btn-ghost btn-sm" href="' + esc(H.files.md) + '" target="_blank" rel="noopener">在浏览器里看</a>'
+          : '<span class="muted">后端未给下载链接</span>') +
+        '</div>';
+      return;
+    }
+
+    metaEl.textContent = '共 ' + H.sections.length + ' 段';
+    toggle.hidden = false;
+
+    var secs = H.sections.map(function (s, i) {
+      return '<details class="ho-sec" ' + (i === 0 ? 'open' : '') + '>' +
+        '<summary>' + esc(s.title) + '</summary>' +
+        '<div class="ho-body">' + miniMarkdown(renderBlockText(s.body)) + '</div>' +
+        '</details>';
+    }).join('');
+
+    bodyEl.innerHTML =
+      (H.intro ? '<div class="ho-intro">' + miniMarkdown(H.intro) + '</div>' : '') +
+      secs +
+      '<div class="ho-downloads">' +
+      '<button class="btn btn-ghost btn-sm" type="button" id="btnHoMd">下载交接说明（md）</button>' +
+      (hasHandoverHtml(u)
+        ? '<a class="btn btn-ghost btn-sm" id="btnHoHtml" href="' + esc(handoverHtmlHref(u)) + '" target="_blank" rel="noopener">下载 / 打印（html）</a>'
+        : '') +
+      '</div>';
+
+    var md = $('#btnHoMd');
+    if (md) md.addEventListener('click', function () { download('05_交接说明.md', '\ufeff' + handoverMarkdown(u)); });
+
+    if (toggle.getAttribute('data-bound') !== '1') {
+      toggle.setAttribute('data-bound', '1');
+      toggle.addEventListener('click', function () {
+        var anyOpen = $$('#handoverBody .ho-sec[open]').length > 0;
+        $$('#handoverBody .ho-sec').forEach(function (d) { d.open = !anyOpen; });
+      });
+    }
+  }
+
+  function hasHandoverHtml(u) {
+    var raw = u.raw || {};
+    var h = raw.handover || {};
+    var f = h.files || h.artifacts || {};
+    return !!(f.html || f.html_href || h.html || h.html_href);
+  }
+
+  function handoverHtmlHref(u) {
+    var raw = u.raw || {};
+    var h = raw.handover || {};
+    var f = h.files || h.artifacts || {};
+    return f.html || f.html_href || h.html || h.html_href || '';
+  }
+
+  /* ───────── F2 · 需求确认面板 ─────────
+     四块内容全部来自后端；未确认事项用警示色条。
+     任何情况下都不改动按钮状态。 */
+  function renderConfirm(u) {
+    var C = u.confirm;
+    var U = u.unconfirmed || { confirmed: null, items: [] };
+    var bodyEl = $('#confirmBody');
+    var metaEl = $('#confirmMeta');
+
+    renderCaliberNote(u);
+
+    if (!C) {
+      metaEl.textContent = '';
+      bodyEl.innerHTML = '<div class="empty"><span class="empty-icon">—</span>' +
+        '暂无需求确认单（后端未返回 confirm 字段）。' +
+        '<br><span class="muted">本地离线模式不产出需求确认单；联机模式下由后端生成。</span></div>';
+      return;
+    }
+
+    // 真实后端契约：confirm 只是产物描述，四块内容在「需求确认单.md」里
+    if (C.fileOnly) {
+      metaEl.textContent = '正文见文件';
+      bodyEl.innerHTML =
+        '<div class="cf-block">' +
+        '<h4>需求确认单已生成</h4>' +
+        '<div class="cf-none">后端已生成「需求确认单.md」，四块内容（我理解的三件事 / 客户不要的 / 问答 / 未确认事项）都在该文件里。</div>' +
+        '<div class="ho-downloads">' +
+        (C.file && C.file.md
+          ? '<a class="btn btn-primary btn-sm" href="' + esc(C.file.md) + '" download>下载需求确认单（md）</a>' +
+            '<a class="btn btn-ghost btn-sm" href="' + esc(C.file.md) + '" target="_blank" rel="noopener">在浏览器里看</a>'
+          : '<span class="muted">后端未给下载链接</span>') +
+        '</div></div>' +
+        (U.items && U.items.length
+          ? '<div class="cf-block"><h4>未确认事项（' + U.items.filter(function (x) { return !x.signed; }).length + ' 条）</h4>' +
+            U.items.filter(function (x) { return !x.signed; }).map(function (it) {
+              return '<div class="cf-warn"><span class="cw-label">' + esc(it.label) + '</span>' +
+                '<span class="cw-tail">' + esc(it.effective || '已按此口径计算') + '</span></div>';
+            }).join('') + '</div>'
+          : '');
+      return;
+    }
+
+    var signedAll = U.confirmed === true;
+    metaEl.textContent = signedAll ? '客户已签字确认' : '存在未确认事项';
+
+    var blocks = [];
+
+    blocks.push('<div class="cf-block">' +
+      '<h4>我理解的三件事</h4>' +
+      (C.understanding.length
+        ? '<ul class="cf-list">' + C.understanding.map(function (x) { return '<li>' + inline(str(x)) + '</li>'; }).join('') + '</ul>'
+        : '<div class="cf-none">暂无</div>') +
+      '</div>');
+
+    blocks.push('<div class="cf-block">' +
+      '<h4>客户不要的</h4>' +
+      (C.notWanted.length
+        ? '<ul class="cf-list">' + C.notWanted.map(function (x) { return '<li>' + inline(str(x)) + '</li>'; }).join('') + '</ul>'
+        : '<div class="cf-none">暂无</div>') +
+      '</div>');
+
+    blocks.push('<div class="cf-block">' +
+      '<h4>问答（共 ' + C.qa.length + ' 条）</h4>' +
+      (C.qa.length
+        ? '<div class="table-wrap"><table class="cf-table"><thead><tr><th style="width:38%">问</th><th>答复</th></tr></thead><tbody>' +
+          C.qa.map(function (q) {
+            return '<tr><td class="wrap">' + inline(q.q || '—') + '</td><td class="wrap">' +
+              (q.a ? inline(q.a) : '<span class="muted">未答复</span>') + '</td></tr>';
+          }).join('') + '</tbody></table></div>'
+        : '<div class="cf-none">暂无</div>') +
+      '</div>');
+
+    // 未确认事项：醒目警示色条
+    var uItems = (U.items || []).filter(function (x) { return !x.signed; });
+    var uCount = uItems.length;
+    blocks.push('<div class="cf-block">' +
+      '<h4>未确认事项' + (uCount ? '（' + uCount + ' 条）' : '') + '</h4>' +
+      (uCount
+        ? uItems.map(function (it) {
+            var tail = it.effective ? ' · ' + it.effective : ' · 已按此口径计算';
+            return '<div class="cf-warn">' +
+              '<span class="cw-label">' + esc(it.label) + '</span>' +
+              '<span class="cw-tail">' + esc(tail) + '</span>' +
+              '</div>';
+          }).join('')
+        : '<div class="cf-none ok">没有未确认事项' + (U.confirmed === true ? '（客户已确认）' : '') + '</div>') +
+      '</div>');
+
+    bodyEl.innerHTML = blocks.join('');
+  }
+
+  /** 产能区口径小字：显示与否由后端 unconfirmed.confirmed 驱动，前端不写死 */
+  function renderCaliberNote(u) {
+    var el = $('#caliberNote');
+    if (!el) return;
+    var U = u.unconfirmed || {};
+    var items = (U.items || []).filter(function (x) { return !x.signed; });
+    var needShow = (U.confirmed === false) || (U.confirmed == null && items.length > 0);
+
+    if (needShow) {
+      var flowItem = items.filter(function (x) { return /流水|间隔|30/.test(x.label); })[0];
+      var caliber = flowItem ? (flowItem.label + ' 口径') : '当前口径';
+      el.hidden = false;
+      el.innerHTML = '此缺口在「' + esc(caliber) + '」口径下算出；若客户确认口径不同，此数会变';
+    } else {
+      el.hidden = true;
+      el.innerHTML = '';
+    }
+  }
+
   /* ───────── 数据体检 ───────── */
   function renderHealth(R) {
     var H = R.health;
@@ -1059,8 +1580,8 @@
     return csv(rows);
   }
 
-  function download(name, text) {
-    var blob = new Blob([text], { type: 'text/csv;charset=utf-8' });
+  function download(name, text, mime) {
+    var blob = new Blob([text], { type: mime || 'text/csv;charset=utf-8' });
     var a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = name;
@@ -1070,6 +1591,16 @@
   }
 
   /* ═══════════ 初始化 ═══════════ */
+  // 先探测后端：http 打开且服务在线 → 走后端；否则走本地 engine。
+  // 探测失败不阻塞页面，直接按本地模式起。
+  state.useServer = false;
+  if (window.APSData) {
+    APSData.probe().then(function (r) {
+      state.useServer = !!r.online;
+      var mode = $('#footMode');
+      if (mode) mode.textContent = r.online ? '服务端模式' : '本地离线模式';
+    }).catch(function () { state.useServer = false; });
+  }
   syncSegs();
   updateParamline();
   setStatus('请先选择台账文件', 'idle');

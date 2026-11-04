@@ -171,13 +171,26 @@
       </div>
     </div>
 
+    <!-- 新鲜度行：常驻，用来判断「这是不是最新一版」 -->
+    <div class="freshness" id="freshness" hidden>
+      <span class="freshness-dot"></span>
+      <span>本次结果生成于 <b id="freshTime">—</b></span>
+      <span class="dot">·</span>
+      <span>数据源 <b id="freshSource">—</b></span>
+      <span class="dot">·</span>
+      <span id="freshMode">—</span>
+    </div>
+
     <!-- 校验横幅 -->
     <div class="banner" id="verifyBanner"></div>
+
+    <!-- 产物区：五件产物，成功才出现，失败/生成中清空 -->
+    <section class="artifacts" id="artifacts"></section>
 
     <!-- 六张指标卡 -->
     <section class="cards" id="cards"></section>
 
-    <!-- 四个页签 -->
+    <!-- 页签 -->
     <div class="tabs" role="tablist">
       <button class="tab is-active" data-tab="gantt" role="tab">甘特图</button>
       <button class="tab" data-tab="orders" role="tab">排单表</button>
@@ -185,6 +198,8 @@
       <button class="tab" data-tab="verify" role="tab">校验<span class="tab-badge" id="tabBadgeVerify">0</span></button>
       <button class="tab" data-tab="health" role="tab">数据体检<span class="tab-badge" id="tabBadgeHealth">0</span></button>
       <button class="tab" data-tab="capacity" role="tab">产能核对</button>
+      <button class="tab" data-tab="handover" role="tab">交接说明</button>
+      <button class="tab" data-tab="confirm" role="tab">需求确认</button>
     </div>
 
     <!-- 甘特 -->
@@ -262,6 +277,33 @@
       </div>
       <p class="panel-note">口径：每台可用机 6 个工作日 × 960 min（两班）。负荷 = 单件工时 × 数量，逐工序累加。这是「任何排法都做不完」的硬证据，与算法无关。</p>
       <div id="capacityBody"></div>
+      <!-- 口径提示：显示与否由后端 unconfirmed.confirmed 驱动，前端不写死 -->
+      <div class="caliber-note" id="caliberNote" hidden></div>
+    </section>
+
+    <!-- 交接说明（F1） -->
+    <section class="panel" data-panel="handover">
+      <div class="panel-head">
+        <h3>交接说明</h3>
+        <div class="panel-tools">
+          <button class="btn btn-ghost btn-sm" id="btnHandoverToggle" type="button" hidden>展开 / 收起</button>
+          <span class="muted" id="handoverMeta"></span>
+        </div>
+      </div>
+      <div class="stale-hint">换了一周的台账，这份说明里的参数和假设要跟着重跑才会更新</div>
+      <div id="handoverBody"></div>
+    </section>
+
+    <!-- 需求确认（F2） -->
+    <section class="panel" data-panel="confirm">
+      <div class="panel-head">
+        <h3>需求确认单</h3>
+        <div class="panel-tools"><span class="muted" id="confirmMeta"></span></div>
+      </div>
+      <p class="panel-note">
+        四块内容全部来自后端返回；未确认事项一律显著标出，但<b>不会</b>因此禁用生成、下载或打印。
+      </p>
+      <div id="confirmBody"></div>
     </section>
   </div>
 </main>
@@ -276,6 +318,7 @@
 
 <script src="xlsx-lite.js"></script>
 <script src="engine.js"></script>
+<script src="datasource.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

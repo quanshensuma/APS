@@ -894,3 +894,253 @@ tr.row-ok td:first-child { box-shadow: inset 3px 0 0 var(--green); }
   .banner { display: flex; }
   .gantt-wrap { overflow: visible; }
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   F1/F2/F3 新增：新鲜度行 / 产物区 / 交接说明 / 需求确认
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ───────── 新鲜度行（顶部常驻） ───────── */
+.freshness {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--ink-2);
+  background: #fff;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--green);
+  border-radius: 8px;
+  padding: 8px 13px;
+  margin-bottom: 12px;
+}
+.freshness .freshness-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--green); flex: none;
+}
+.freshness b { font-family: var(--mono); color: var(--ink); font-weight: 600; }
+.freshness .dot { opacity: .45; }
+
+/* ───────── 产物区 ───────── */
+.artifacts {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+.artifacts.is-pending,
+.artifacts.is-failed {
+  box-shadow: none;
+  background: #fbfcfe;
+}
+.art-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.art-head h3 { font-size: 14px; }
+.art-warnbar {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: #8a5a15;
+  background: var(--orange-soft);
+  border: 1px solid #f5dcb4;
+  border-radius: 999px;
+  padding: 3px 12px;
+}
+.art-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 10px;
+}
+@media (max-width: 1180px) { .art-grid { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 720px) { .art-grid { grid-template-columns: repeat(2, 1fr); } }
+
+.art-card {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 10px 12px;
+  background: #fbfcfe;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.art-card.is-off { opacity: .55; }
+.art-card .ac-name { font-size: 13px; font-weight: 650; }
+.art-card .ac-note { font-size: 11px; color: var(--ink-3); }
+.art-card .ac-actions { margin-top: 6px; }
+.ac-btn {
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 7px;
+  border: 1px solid #cfe0f8;
+  background: var(--blue-soft);
+  color: var(--blue);
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+}
+.ac-btn:hover { background: #dfeafc; }
+
+/* 失败空态 */
+.artifact-fail {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 16px 14px;
+  border: 1px dashed #e0c4c3;
+  border-radius: 10px;
+  background: var(--red-soft);
+}
+.af-icon {
+  width: 30px; height: 30px; flex: none;
+  border-radius: 50%;
+  background: var(--red); color: #fff;
+  display: grid; place-items: center;
+  font-size: 15px; font-weight: 700;
+}
+.af-title { font-size: 14px; font-weight: 700; color: #8a2f2c; }
+.af-sub { font-size: 12.5px; color: #8a2f2c; opacity: .85; margin-top: 3px; line-height: 1.65; }
+
+/* 归档次要入口：视觉明显弱于正常下载 */
+.artifact-stale {
+  margin-top: 12px;
+  padding: 9px 13px;
+  border: 1px dashed #d8dde5;
+  border-radius: 8px;
+  background: #f7f8fa;
+}
+.as-head { font-size: 11.5px; color: var(--ink-3); margin-bottom: 5px; }
+.as-body { display: flex; gap: 14px; flex-wrap: wrap; }
+.as-link {
+  font-size: 11.5px;
+  color: var(--ink-3);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 3px;
+}
+.as-link:hover { color: var(--ink-2); }
+
+/* ───────── 交接说明 ───────── */
+.stale-hint {
+  font-size: 12px;
+  color: #8a5a15;
+  background: var(--orange-soft);
+  border: 1px solid #f5dcb4;
+  border-radius: 8px;
+  padding: 8px 13px;
+  margin-bottom: 14px;
+}
+.ho-intro {
+  font-size: 13px;
+  color: var(--ink-2);
+  background: #fbfcfe;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  line-height: 1.75;
+}
+.ho-sec {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  margin-bottom: 9px;
+  overflow: hidden;
+  background: #fff;
+}
+.ho-sec > summary {
+  cursor: pointer;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 650;
+  background: #fbfcfe;
+  border-bottom: 1px solid var(--line-2);
+  list-style: none;
+}
+.ho-sec > summary::-webkit-details-marker { display: none; }
+.ho-sec > summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: 8px;
+  color: var(--ink-3);
+  transition: transform .15s;
+}
+.ho-sec[open] > summary::before { content: "▾"; }
+.ho-body { padding: 10px 16px 12px; font-size: 12.5px; line-height: 1.8; color: var(--ink-2); }
+.ho-body p { margin: 0 0 6px; }
+.ho-body ul { margin: 0 0 8px; padding-left: 20px; }
+.ho-body li { margin-bottom: 3px; }
+.ho-body b { color: var(--ink); }
+.ho-body code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  background: #f2f4f8;
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.ho-downloads {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--line);
+}
+.ho-downloads .btn { text-decoration: none; }
+
+/* ───────── 需求确认 ───────── */
+.cf-block {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 12px 15px;
+  margin-bottom: 11px;
+  background: #fff;
+}
+.cf-block h4 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--ink);
+}
+.cf-list { margin: 0; padding-left: 20px; font-size: 12.5px; line-height: 1.85; color: var(--ink-2); }
+.cf-none { font-size: 12.5px; color: var(--ink-3); }
+.cf-none.ok { color: var(--green); }
+
+.cf-table { font-size: 12.5px; }
+.cf-table th { text-align: left; }
+.cf-table td { line-height: 1.7; }
+
+/* 未确认事项：醒目警示色条 */
+.cf-warn {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 9px 13px;
+  margin-bottom: 7px;
+  border-radius: 7px;
+  background: var(--orange-soft);
+  border: 1px solid #f5dcb4;
+  border-left: 4px solid var(--orange);
+  font-size: 12.5px;
+}
+.cf-warn .cw-label { font-weight: 650; color: #8a5a15; }
+.cf-warn .cw-tail { color: #a8813a; font-size: 12px; }
+
+/* 产能区口径小字 */
+.caliber-note {
+  margin-top: 12px;
+  font-size: 11.5px;
+  color: #8a5a15;
+  background: var(--orange-soft);
+  border: 1px solid #f5dcb4;
+  border-radius: 7px;
+  padding: 7px 12px;
+}
