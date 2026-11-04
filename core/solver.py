@@ -254,6 +254,137 @@ def place_flow_lot(ops_of_lot, timelines, clean, horizon, fc, flow_interp="a"):
     return True
 
 
+def place_flow_group(order, lots, grouped, timelines, clean, horizon,
+                     fc, opts, unplannable):
+    """C3 子批分组排程：先并行排所有车，再逐个排磨。
+
+    【与前端 engine.js 对齐】这样才能吃到多台车床的并行度，
+    makespan 比"一个子批车磨一起排完再下一个"小得多。
+    """
+    max_gap = fc["max_gap_min"]
+    stages = []          # [(lot_key, lotops, car, grd, r_car)]
+
+    # ---- ① 所有子批先排车 ----
+    for lot_key in lots:
+        lotops = grouped[lot_key]
+        car = next((o for o in lotops if o["seq"] == fc["from_seq"]), None)
+        grd = next((o for o in lotops if o["seq"] == fc["to_seq"]), None)
+        if car is None or grd is None:
+            _fail(lotops, lotops[0], "流水约束的工序不在该子批中")
+            unplannable.append(_unplannable_rec(lot_key, order, lotops, "H5/产能"))
+            continue
+
+        cands = resolve_candidates(car, clean)
+        if not cands:
+            _fail(lotops, car, "流水约束：车床无可用机台")
+            unplannable.append(_unplannable_rec(lot_key, order, lotops, "H5/产能"))
+            continue
+
+        earliest = release_axis(car, horizon)
+        best = None
+        for mid in cands:
+            sl = timelines[mid].earliest_slot(earliest, car["duration"], horizon["cap"])
+            if sl is None:
+                continue
+            r = cal.advance(sl, car["duration"], horizon)
+            if r is None:
+                continue
+            key = (r[0], timelines[mid].load())
+            if best is None or key < best[0]:
+                best = (key, mid, r)
+        if best is None:
+            _fail(lotops, car, "流水约束：车床无可用槽位")
+            unplannable.append(_unplannable_rec(lot_key, order, lotops, "H5/产能"))
+            continue
+
+        _, mid, r = best
+        timelines[mid].occupy(*r)
+        car["machine"], car["start_axis"], car["end_axis"] = mid, r[0], r[1]
+        car["status"] = "scheduled"
+        stages.append((lot_key, lotops, car, grd, r))
+
+    # ---- ② 逐个把磨排到车完工之后 ----
+    gaps = [30, 25, 20, 15, 10, 5] if opts.flow_interp == "c" else [30, 25, 20, 15, 10, 5, 0]
+    gaps = [g for g in gaps if g <= max_gap] or [max_gap]
+
+    # 【关键】磨床占用顺序 = 按「订单优先级 → 车完工时间」。
+    # 不能只按车完工排：低优先级订单的车可能抢在前面，
+    # 结果高优先级订单的磨被挤到后面，gap 爆掉（实测 2030~4030min）。
+    stages.sort(key=lambda x: (-order.get("priority", 3), x[4][1]))
+
+    for lot_key, lotops, car, grd, r_car in stages:
+        grd_cands = resolve_candidates(grd, clean)
+        car_end = r_car[1]
+        best = None
+        if grd_cands:
+            for mid_g in grd_cands:
+                tl_g = timelines[mid_g]
+                for ws, we in tl_g.free_windows(grd["duration"], horizon["cap"]):
+                    for gap in gaps:
+                        start_g = max(car_end + gap, ws)
+                        if we is not None and start_g + grd["duration"] > we:
+                            continue
+                        actual = start_g - car_end
+                        if actual < 0 or actual > max_gap:
+                            continue
+                        r_g = cal.advance(start_g, grd["duration"], horizon)
+                        if r_g is None:
+                            continue
+                        if opts.flow_interp == "c":
+                            eg = r_g[1] - car_end
+                            if not (0 <= eg <= max_gap):
+                                continue
+                        # gap 越小越好（越紧贴车完工），其次开工越早越好
+                        score = (actual, r_g[0])
+                        if best is None or score < best[0]:
+                            best = (score, mid_g, r_g, actual)
+                        break
+
+        if best is None:
+            # 退化：顺排，交给 H5 报违规（与前端一致）
+            if not _place_flow_fallback_single(lotops, timelines, clean, horizon,
+                                               car, grd, r_car, max_gap):
+                unplannable.append(_unplannable_rec(lot_key, order, lotops, "H5/产能"))
+            continue
+
+        _, mid_g, r_g, gap = best
+        timelines[mid_g].occupy(*r_g)
+        grd["machine"], grd["start_axis"], grd["end_axis"] = mid_g, r_g[0], r_g[1]
+        grd["status"] = "scheduled"
+        car["flow_gap"] = grd["flow_gap"] = gap
+    return True
+
+
+def _place_flow_fallback_single(lotops, timelines, clean, horizon,
+                                car, grd, r_car, max_gap):
+    """车已排好，磨退化为"车完工后第一个可用窗口"（不再要求 ≤max_gap）。"""
+    grd_cands = resolve_candidates(grd, clean)
+    if not grd_cands:
+        return _fail(lotops, grd, "流水约束：磨床无可用机台")
+    car_end = r_car[1]
+    best = None
+    for mid_g in grd_cands:
+        sl = timelines[mid_g].earliest_slot(car_end, grd["duration"], horizon["cap"])
+        if sl is None:
+            continue
+        r = cal.advance(sl, grd["duration"], horizon)
+        if r is None:
+            continue
+        key = (r[0], timelines[mid_g].load())
+        if best is None or key < best[0]:
+            best = (key, mid_g, r)
+    if best is None:
+        return _fail(lotops, grd, "流水约束：磨床无可用槽位")
+    _, mid_g, r_g = best
+    timelines[mid_g].occupy(*r_g)
+    grd["machine"], grd["start_axis"], grd["end_axis"] = mid_g, r_g[0], r_g[1]
+    grd["status"] = "scheduled"
+    gap = grd["start_axis"] - car["end_axis"]
+    car["flow_gap"] = grd["flow_gap"] = gap
+    grd["flow_violation"] = gap > max_gap
+    return True
+
+
 def _place_flow_fallback(ops_of_lot, timelines, clean, horizon,
                         car, grd, car_cands, grd_cands, max_gap):
     """C3 紧贴失败时的退化路径：顺排 + 标记违规。
@@ -366,12 +497,14 @@ def schedule(ops, clean, horizon, opts, rule="FIFO"):
 
     for order in flow_orders:
         fc = fc_map[order["product"]]
-        for lot_key in sorted([k for k in grouped if k[0] == order["id"]],
-                              key=lambda k: k[1]):
-            lotops = grouped[lot_key]
-            if not place_flow_lot(lotops, timelines, clean, horizon,
-                                  fc, opts.flow_interp):
-                unplannable.append(_unplannable_rec(lot_key, order, lotops, "H5/产能"))
+        lots = sorted([k for k in grouped if k[0] == order["id"]],
+                      key=lambda k: k[1])
+        # 【与前端对齐】先给所有子批的「车」排位（车床有 3 台，可并行），
+        # 再逐个把「磨」排到各自车完工之后最紧的窗口。
+        # 串行"车磨一起排"会让 L2 白等 L1 的磨，makespan 明显偏大。
+        if not place_flow_group(order, lots, grouped, timelines, clean,
+                                horizon, fc, opts, unplannable):
+            continue
 
     for order in plain_orders:
         for lot_key in sorted([k for k in grouped if k[0] == order["id"]],

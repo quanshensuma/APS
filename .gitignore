@@ -24,8 +24,10 @@ data/*
 !data/.gitkeep
 !docs/samples/*.md
 
-# 中间产物（排程结果转储，含客户单号，可由 run.py 重生成）
+# 中间产物（排程结果转储，含客户单号，可由 run.py / app.py 重生成）
 gen*.json
+g.json
+g2.json
 *.tmp.json
 !package.json
 !*.config.json

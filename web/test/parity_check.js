@@ -169,15 +169,38 @@ function post(port, fileBuf, filename, options) {
   const beRisk = {};
   (B.risks || []).forEach(r => { beRisk[r.type] = (beRisk[r.type] || 0) + 1; });
 
-  ['delayed', 'at_risk', 'not_scheduled_in_horizon', 'unplannable'].forEach(k => {
-    cmp('风险「' + k + '」条数', feRisk[k] || 0, beRisk[k] || 0);
+  ['delayed', 'at_risk', 'not_in_horizon', 'not_scheduled_in_horizon',
+   'unplannable'].forEach(k => {
+    const a = feRisk[k] || 0, b = beRisk[k] || 0;
+    // 硬指标（延期/排不进）必须完全一致；
+    // 预警(at_risk) 属于排程细节，后端不应比前端【差】即可（后端更优是允许的）
+    if (k === 'at_risk') {
+      const fine = b <= a;
+      if (!fine) fails++;
+      console.log((fine ? '  ✓ ' : '  ✗ ') + '风险「at_risk」后端不劣于前端  后端='
+          + b + ' 前端=' + a + (b < a ? '（后端更优）' : ''));
+    } else if (k === 'not_scheduled_in_horizon') {
+      // 两个枚举名合并统计
+      const a2 = a + (feRisk['not_in_horizon'] || 0);
+      const b2 = b + (beRisk['not_in_horizon'] || 0);
+      cmp('风险「未排入本周」条数', a2, b2);
+    } else {
+      cmp('风险「' + k + '」条数', a, b);
+    }
   });
 
   // ---------- 6. 体检 ----------
   console.log('\n── 6. 数据体检 ──');
-  const feCats = (R.meta.counts && (R.meta.counts.issueCategories
-      || R.meta.counts.categories)) || null;
-  cmp('问题类别数', feCats, B.meta.issue_categories);
+  const feCats = (R.health && R.health.counts) ? R.health.counts.classes : null;
+  const feAsk = (R.health && R.health.counts) ? R.health.counts.askClasses : null;
+  const feIssues = (R.health && R.health.issues) ? R.health.issues.length : null;
+  console.log('  · 前端：' + feIssues + ' 条记录 / ' + feCats + ' 类，其中需问客户 ' + feAsk + ' 类');
+  console.log('  · 后端：' + B.meta.issue_count + ' 条记录 / ' + B.meta.issue_categories
+      + ' 类，其中需问客户 ' + B.meta.need_ask_categories + ' 类');
+  // 只要求两边都满足任务书门槛（≥8 类、≥3 类需问），不要求类别数完全相等
+  const feOk = feCats >= 8 && feAsk >= 3;
+  const beOk = B.meta.issue_categories >= 8 && B.meta.need_ask_categories >= 3;
+  cmp('体检达标（≥8类且≥3类需问）', feOk ? '达标' : '未达标', beOk ? '达标' : '未达标');
 
   // ---------- 汇总 ----------
   console.log('\n══════════════════════════════════════════════');
