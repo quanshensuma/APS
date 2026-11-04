@@ -1,0 +1,16 @@
+* text=auto eol=lf
+
+# 二进制：不做文本 diff / 行尾转换
+*.xlsx binary
+*.xls  binary
+*.docx binary
+*.pptx binary
+*.pdf  binary
+*.png  binary
+*.jpg  binary
+
+# 脚本保持 LF
+*.py   text eol=lf
+*.js   text eol=lf
+*.md   text eol=lf
+*.json text eol=lf

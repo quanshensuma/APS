@@ -1,0 +1,27 @@
+# ===== Python =====
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# ===== 产物（任务书 N1 要求排除）=====
+out/
+*.egg-info/
+.pytest_cache/
+
+# ===== 客户数据（N1 红线：绝不进仓库）=====
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+data/
+!data/.gitkeep
+
+# ===== 临时与系统 =====
+_tmp_*
+~$*
+Thumbs.db
+desktop.ini
+.DS_Store
