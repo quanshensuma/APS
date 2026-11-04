@@ -79,12 +79,17 @@ def write_schedule_xlsx(sched, clean, horizon, path, opts=None):
             s_dt = cal.minutes_to_dt(o["start_axis"], horizon)
             e_dt = cal.minutes_to_dt(o["end_axis"], horizon)
             shift = "白班" if (o["start_axis"] % config.DAY_MINUTES) < config.SHIFT_MINUTES else "夜班"
+            # 【关键】跨日工序的完工必须带日期，否则 21:50 → 17:30 看起来像倒流
+            cross_days = (e_dt.date() - s_dt.date()).days
+            end_txt = e_dt.strftime("%H:%M")
+            if cross_days > 0:
+                end_txt = e_dt.strftime("%m-%d %H:%M")
             ws.append([
                 s_dt.strftime("%Y-%m-%d"), shift, mid,
                 f"{o['order_id']}" + (f"/{o['lot_id'].split('-')[-1]}"
                                       if o["lot_id"] != o["order_id"] else ""),
                 o.get("product"), o["op"], o["qty"],
-                s_dt.strftime("%H:%M"), e_dt.strftime("%H:%M"), o["duration"],
+                s_dt.strftime("%H:%M"), end_txt, o["duration"],
             ])
 
         for row in ws.iter_rows(min_row=2, max_row=ws.max_row, max_col=len(heads)):
@@ -311,33 +316,37 @@ h1 {{ font-size: 20px; margin: 0 0 6px; }}
 def decide_status(planned_end, due, qty_total, qty_planned, horizon):
     """纯函数：判定订单状态。
 
-    返回 ok / delayed / at_risk / not_scheduled_in_horizon / unplannable
+    【与前端 engine.js 的 summarize 判定顺序严格对齐】
+      1. 一道都没排 / 没排全        → unplannable
+      2. 交期（顺延周日）在窗口之后  → not_in_horizon（不算延期）
+      3. 无硬交期                    → ok（只报预计完工）
+      4. 完工 > 交期                 → delayed
+      5. 余量 < 一个班次             → at_risk
+      6. 其它                        → ok
     """
     if qty_planned <= 0 or planned_end is None:
-        if due is None:
-            return "unplannable"
-        if due > horizon["days"][-1]:
-            return "not_scheduled_in_horizon"
         return "unplannable"
     if qty_planned + config.EPS < qty_total:
-        return "at_risk"
-    if due is None:
-        return "ok"
-    due_axis = cal.due_to_axis(due, horizon)
-    if due_axis is None:
-        return "ok"                      # 交期在窗口外，不算延期
-    if planned_end > due_axis:
+        return "unplannable"             # 与前端一致：没排全也算排不进
+
+    info = cal.due_info(due, horizon)
+    if due is not None and not info["in_horizon"]:
+        return "not_in_horizon"          # 交期在窗口后，本周排不排都不算延期
+    if info["axis"] is None:
+        return "ok"                      # 无硬交期
+    if planned_end > info["axis"]:
         return "delayed"
-    if due_axis - planned_end < config.AT_RISK_MINUTES:
+    if info["axis"] - planned_end < config.AT_RISK_MINUTES:
         return "at_risk"
     return "ok"
 
 
 _STATUS_CN = {
-    "ok": "正常",
+    "ok": "准时",
     "delayed": "延期",
     "at_risk": "预警",
-    "not_scheduled_in_horizon": "未排入本周",
+    "not_in_horizon": "未排入本周",
+    "not_scheduled_in_horizon": "未排入本周",   # 兼容旧枚举
     "unplannable": "排不进",
 }
 
@@ -361,6 +370,27 @@ def build_risk_rows(sched, clean, horizon, unplannable=None):
         unplan_by_order.setdefault(u["order_id"], []).append(u)
 
     rows = []
+
+    # 【与前端对齐】被闸门拦住的订单也要出现在风险清单里（记为 unplannable），
+    # 否则客户看到「14 单」但清单只有 13 行，会以为漏了一单。
+    for b in clean.get("blocked", []):
+        rows.append({
+            "order_id": b.get("order_id") or "—",
+            "status": "unplannable",
+            "status_cn": _STATUS_CN["unplannable"],
+            "due": None,
+            "due_level": None,
+            "planned_end": None,
+            "delay_days": None,
+            "bottleneck_machine": None,
+            "bottleneck_op": None,
+            "qty": None,
+            "qty_planned": 0,
+            "product": b.get("product"),
+            "action": f"排不进：{b.get('category','')}——{b.get('handling','')}",
+            "from_gate": True,
+        })
+
     for order in sorted(clean["orders"], key=lambda x: x["id"]):
         oid = order["id"]
         planned_end = per_order_end.get(oid)
@@ -400,7 +430,7 @@ def _action_text(st, delay_days, bn_m, unplan):
         return f"卡在 {bn_m}：启用闲置机台 / 与客户协商延期 {delay_days:g} 天 / 调大 --lot-size"
     if st == "at_risk":
         return "余量不足一个班次，建议提前确认物料与人员"
-    if st == "not_scheduled_in_horizon":
+    if st in ("not_in_horizon", "not_scheduled_in_horizon"):
         return "交期在窗口外，建议顺延下一窗口，本周不排"
     if st == "unplannable":
         if unplan:
@@ -454,7 +484,7 @@ def write_risk_xlsx(rows, horizon, path):
     ws.append([])
     ws.append([f"合计 {len(rows)} 单",
                f"延期 {cnt.get('delayed',0)} / 预警 {cnt.get('at_risk',0)} / "
-               f"未排入本周 {cnt.get('not_scheduled_in_horizon',0)} / "
+               f"未排入本周 {cnt.get('not_in_horizon',0)+cnt.get('not_scheduled_in_horizon',0)} / "
                f"排不进 {cnt.get('unplannable',0)}"])
     ws.cell(row=ws.max_row, column=1).font = Font(name=_FONT, size=9, bold=True)
     ws.cell(row=ws.max_row, column=2).font = Font(name=_FONT, size=9, bold=True)

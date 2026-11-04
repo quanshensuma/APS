@@ -28,17 +28,19 @@ class Timeline:
         self.machine_id = machine_id
         self.busys = []          # [(start, end)]  升序
 
-    def earliest_slot(self, after, duration, cap):
-        """返回 >= after 的、能容纳 duration 的最早开始点；不足则 None。"""
+    def earliest_slot(self, after, duration, cap=None):
+        """返回 >= after 的、能容纳 duration 的最早开始点。
+
+        【与前端对齐】不再受窗口 cap 限制 —— 排不下就往后排（排到下周），
+        而不是把整单标成"排不进"。"本周排不完"由风险清单按类型体现。
+        """
         t = max(after, 0)
         for s, e in self.busys:
             if t + duration <= s:
                 return t
             if e > t:
                 t = e
-        if t + duration <= cap:
-            return t
-        return None
+        return t
 
     def occupy(self, start, end):
         for s, e in self.busys:
@@ -49,16 +51,17 @@ class Timeline:
         self.busys.append((start, end))
         self.busys.sort()
 
-    def free_windows(self, min_dur, cap):
-        """返回所有 >= min_dur 的空闲窗口 [(s, e)]。"""
+    def free_windows(self, min_dur, cap=None):
+        """返回所有 >= min_dur 的空闲窗口 [(s, e)]，含末尾无限延伸的那一段。"""
         out = []
         prev = 0
         for s, e in self.busys:
             if s - prev >= min_dur:
                 out.append((prev, s))
             prev = max(prev, e)
-        if cap - prev >= min_dur:
-            out.append((prev, cap))
+        # 末尾：给一个足够大的上界（相当于"永远有空"）
+        tail_end = max(prev + min_dur, (cap or 0) + min_dur)
+        out.append((prev, tail_end))
         return out
 
     def load(self):
@@ -99,8 +102,6 @@ def release_axis(op, horizon):
     days = horizon["days"]
     if rel <= days[0]:
         return 0
-    if rel > days[-1]:
-        return horizon["cap"]
     try:
         return cal.dt_to_minutes(_dt.datetime(rel.year, rel.month, rel.day, 8), horizon)
     except cal.CalendarError:
@@ -153,11 +154,20 @@ def place_lot(ops_of_lot, timelines, clean, horizon, after_axis=0):
 
 
 def _fail(ops_of_lot, op, reason):
+    """标记整条 lot 未排入。
+
+    【关键】reason 只挂在【失败的那道工序】上（op["fail_reason"]），
+    不能敷到整条链 —— 否则报告里会出现「下料：钻床没槽位」这种错位描述。
+    其它工序只标 unplannable + blocked_by 指回失败工序。
+    """
     for o in ops_of_lot:
         o["status"] = "unplannable"
-        o["machine"] = o.get("machine")
-        o["reason"] = reason
-    op["reason"] = reason
+    op["fail_reason"] = reason
+    op["fail_seq"] = op.get("seq")
+    op["fail_op"] = op.get("op")
+    for o in ops_of_lot:
+        o["blocked_by"] = {"seq": op.get("seq"), "op": op.get("op"),
+                           "reason": reason}
     return False
 
 
@@ -222,8 +232,12 @@ def place_flow_lot(ops_of_lot, timelines, clean, horizon, fc, flow_interp="a"):
                     break
 
     if best is None:
-        return _fail(ops_of_lot, grd,
-                     f"磨床在车完工后 {max_gap}min 内无 {grd['duration']}min 空闲窗口")
+        # 【与前端 engine.js 对齐】紧贴放不进去时，不让整单消失：
+        # 退化为「顺排」—— 车照排，磨排到磨床下一个可用窗口，
+        # 并在 op 上标记 flow_violation，由校验器 H5 如实报出违规。
+        # 理由：客户要看到「这单到底哪天能做完」，而不是「排不进」三个字。
+        return _place_flow_fallback(ops_of_lot, timelines, clean, horizon,
+                                    car, grd, car_cands, grd_cands, max_gap)
 
     _, mid_c, r_c, mid_g, start_g, gap = best
     r_g = cal.advance(start_g, grd["duration"], horizon)
@@ -240,9 +254,65 @@ def place_flow_lot(ops_of_lot, timelines, clean, horizon, fc, flow_interp="a"):
     return True
 
 
+def _place_flow_fallback(ops_of_lot, timelines, clean, horizon,
+                        car, grd, car_cands, grd_cands, max_gap):
+    """C3 紧贴失败时的退化路径：顺排 + 标记违规。
+
+    优先保证「每道工序都有排程」，让 H5 去报间隔超标，
+    而不是让整张单从排程表里消失。
+    """
+    earliest = release_axis(car, horizon)
+
+    # 先排车（取最早可用）
+    best_car = None
+    for mid_c in car_cands:
+        s_c = timelines[mid_c].earliest_slot(earliest, car["duration"], horizon["cap"])
+        if s_c is None:
+            continue
+        r_c = cal.advance(s_c, car["duration"], horizon)
+        if r_c is None:
+            continue
+        key = (r_c[0], timelines[mid_c].load())
+        if best_car is None or key < best_car[0]:
+            best_car = (key, mid_c, r_c)
+    if best_car is None:
+        return _fail(ops_of_lot, car, "流水约束：车床无可用槽位")
+
+    _, mid_c, r_c = best_car
+    car_end = r_c[1]
+
+    # 磨排在车完工之后的第一个可用窗口（不再要求 ≤ max_gap）
+    best_g = None
+    for mid_g in grd_cands:
+        s_g = timelines[mid_g].earliest_slot(car_end, grd["duration"], horizon["cap"])
+        if s_g is None:
+            continue
+        r_g = cal.advance(s_g, grd["duration"], horizon)
+        if r_g is None:
+            continue
+        key = (r_g[0], timelines[mid_g].load())
+        if best_g is None or key < best_g[0]:
+            best_g = (key, mid_g, r_g)
+    if best_g is None:
+        return _fail(ops_of_lot, grd, "流水约束：磨床无可用槽位")
+
+    _, mid_g, r_g = best_g
+    timelines[mid_c].occupy(*r_c)
+    timelines[mid_g].occupy(*r_g)
+
+    car["machine"], car["start_axis"], car["end_axis"] = mid_c, r_c[0], r_c[1]
+    grd["machine"], grd["start_axis"], grd["end_axis"] = mid_g, r_g[0], r_g[1]
+    car["status"] = grd["status"] = "scheduled"
+    gap = grd["start_axis"] - car["end_axis"]
+    car["flow_gap"] = gap
+    grd["flow_gap"] = gap
+    # 交给校验器 H5 报违规（不在这里下结论）
+    grd["flow_violation"] = gap > max_gap
+    return True
+
+
 # ============================================================
-# 三种规则
-# ============================================================
+# 三种规则 ============================================================
 
 def _order_index(clean):
     return {o["id"]: o for o in clean["orders"]}
@@ -315,17 +385,41 @@ def schedule(ops, clean, horizon, opts, rule="FIFO"):
 
 
 def _unplannable_rec(lot_key, order, lotops, kind):
-    first = lotops[0] if lotops else {}
+    """构造未排入记录。
+
+    【关键】定位到【真正排不进的那道工序】：优先找带 fail_reason 的，
+    找不到才回退到首道。这样报告里「卡在哪道工序」才对得上。
+    """
+    failed = next((o for o in lotops if o.get("fail_reason")), None)
+    if failed is None:
+        failed = lotops[0] if lotops else {}
+    reason = failed.get("fail_reason") or "无法排出"
     return {
         "order_id": lot_key[0],
         "lot_id": lot_key[1],
-        "op": first.get("op"),
-        "seq": first.get("seq"),
-        "reason": first.get("reason") or "无法排出",
+        "op": failed.get("op"),
+        "seq": failed.get("seq"),
+        "reason": reason,
         "kind": kind,
         "product": order.get("product"),
-        "suggestion": "调大 --lot-size / 启用闲置机台 / 顺延下一窗口",
+        "planned_seq_before_fail": [o["seq"] for o in lotops
+                                    if o.get("status") == "scheduled"],
+        "suggestion": _suggest(reason),
     }
+
+
+def _suggest(reason: str) -> str:
+    """按失败原因给可执行的建议（不是套话）。"""
+    r = reason or ""
+    if "磨床" in r or "GRD" in r:
+        return "磨床是单台瓶颈：调大 --lot-size 减少批数 / 启用 GRD-02 / 顺延"
+    if "CNC" in r or "铣" in r:
+        return "CNC-03 停机：确认能否走其他立加（--allow-mill-substitute）"
+    if "无可用机台" in r:
+        return "点名机台不可用：确认是否可换机（Q2/Q6）"
+    if "槽位" in r:
+        return "该机台窗口已被占满：顺延下一窗口 / 增开班次"
+    return "调大 --lot-size / 启用闲置机台 / 顺延下一窗口"
 
 
 # ============================================================
@@ -379,19 +473,38 @@ def pick_best(results):
 
 
 def solve_all(ops, clean, horizon, opts):
-    """跑三种规则，返回 {best_rule, scheduled, unplannable, timelines, all}。"""
+    """跑三种规则，取最好，并把【选中那一次】的状态写回传入的 ops。
+
+    【关键】必须把结果写回原 ops 列表（in-place），
+    否则调用方拿到的 ops 全是 status=pending，校验器会误判全部漏排。
+    用 deepcopy 试算、最后回填，既能比较三种规则又不污染。
+    """
     import copy
+
     results = []
     for rule in config.ALGO_CANDIDATES:
         ops_copy = copy.deepcopy(ops)
         sched, unplan, tls = schedule(ops_copy, clean, horizon, opts, rule)
         ev = evaluate(sched, clean, horizon, opts)
-        results.append({"rule": rule, "scheduled": sched, "unplannable": unplan,
-                        "timelines": tls, "eval": ev})
+        results.append({"rule": rule, "ops": ops_copy, "scheduled": sched,
+                        "unplannable": unplan, "timelines": tls, "eval": ev})
+
     best = pick_best(results)
+
+    # 回填状态到原 ops（按 (order_id, lot_id, seq) 对齐）
+    idx = {(o["order_id"], o["lot_id"], o["seq"]): o for o in ops}
+    for o in best["ops"]:
+        key = (o["order_id"], o["lot_id"], o["seq"])
+        target = idx.get(key)
+        if target is None:
+            continue
+        for f in ("machine", "start_axis", "end_axis", "status", "reason", "flow_gap"):
+            if f in o:
+                target[f] = o[f]
+
     return {
         "best_rule": best["rule"],
-        "scheduled": best["scheduled"],
+        "scheduled": [o for o in ops if o["status"] == "scheduled"],
         "unplannable": best["unplannable"],
         "timelines": best["timelines"],
         "eval": best["eval"],
