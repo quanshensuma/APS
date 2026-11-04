@@ -1,27 +1,41 @@
-# ===== Python =====
+# Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*.so
 .venv/
 venv/
 env/
-
-# ===== 产物（任务书 N1 要求排除）=====
-out/
-*.egg-info/
 .pytest_cache/
+.coverage
+htmlcov/
 
-# ===== 客户数据（N1 红线：绝不进仓库）=====
+# 输出产物
+out/
+*.log
+*.tmp
+*.bak
+
+# 客户数据（红线！台账是客户商业数据，绝对不能进仓库）
 *.xlsx
-*.xls
 *.xlsm
+*.xls
 *.csv
-data/
+data/*
 !data/.gitkeep
+!docs/samples/*.md
 
-# ===== 临时与系统 =====
-_tmp_*
-~$*
-Thumbs.db
-desktop.ini
+# 中间产物（排程结果转储，含客户单号，可由 run.py 重生成）
+gen*.json
+*.tmp.json
+!package.json
+!*.config.json
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
 .DS_Store
+Thumbs.db
+
+# 临时
+~$*
