@@ -87,6 +87,22 @@ function ok(cond, label, extra) {
   ok(grp.flow.ok === false, '流水条件组判定未达成（展示用）', grp.flow.failCount);
   const NOTE = '磨床是瓶颈，产能客观不足导致断档，不是排程算法错误；硬约束 0 违反，这份排程可以交，但这条必须写进交接说明并告知客户代价。';
   ok(v.flowNote === NOTE, 'H5 未达成时给出固定说明文案（逐字一致）', v.flowNote.slice(0, 24) + '…');
+
+  // 规则集必须与后端 config.ALGO_CANDIDATES 一致（任务书表 8 第 4 行硬性验收）
+  console.log('\n=== 5c. 规则集与择优判据 ===');
+  const RULES = ['fifo', 'spt', 'mwkr'];
+  ok(RULES.indexOf(R.meta.rule) >= 0, '选中的规则在这三种之内', R.meta.rule + ' / ' + R.meta.ruleCn);
+  ok(R.meta.ruleCn === '交期优先' || R.meta.ruleCn === '最短工时优先' || R.meta.ruleCn === '最长工时优先',
+    '规则中文名与后端语义对应（FIFO=交期优先）', R.meta.ruleCn);
+  // 三种规则都要能跑出结果，且 prio/edd 不进默认候选
+  const each = RULES.map(rl => {
+    const x = E.run(sheets, { forceRule: rl });
+    return { rl, ok: !!x.summary.length, end103: (x.summary.find(y => y.orderId === 'HD-2026-103') || {}).plannedEndLabel };
+  });
+  each.forEach(e => ok(e.ok, '规则 ' + e.rl + ' 能跑出结果', '103 完工 ' + e.end103));
+  // 基准对照：FIFO 下 103 应落在 11-18（与后端一致）
+  const fifo103 = each.find(e => e.rl === 'fifo').end103;
+  ok(/^11-18/.test(fifo103), 'FIFO 下 103 完工 = 11-18（对齐后端基准）', fifo103);
   ok(v.deliverable === true, '硬约束 0 违反 → 排程可交付（H5 不影响可交付性）', v.deliverable);
 
   // 反向验证：H5 通过时不出现说明文案；关掉流水约束后整体应回到 PASS

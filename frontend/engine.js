@@ -72,7 +72,20 @@
   }
 
   /** 四舍五入到整数分钟 */
-  function r0(x) { return Math.floor(x + 0.5); }
+  /**
+   * 与后端 core/instance.py 的 `int(round(...))` **逐位一致**的取整。
+   * Python 3 的 round() 是「银行家舍入」（四舍六入五取偶）：
+   *   15 × 17.5 = 262.5 → 262（不是 263）
+   *   25 × 17.5 = 437.5 → 438
+   * 用 Math.floor(x+0.5) 会在 .5 处差 1 分钟，逐工序累积后整天错位。
+   */
+  function r0(x) {
+    var f = Math.floor(x);
+    var diff = x - f;
+    if (diff > 0.5) return f + 1;
+    if (diff < 0.5) return f;
+    return (f % 2 === 0) ? f : f + 1;   // .5 → 取偶数
+  }
 
   /* ═══════════════════════════ 1. 日历（工作日轴） ═══════════════════════════ */
 
@@ -771,21 +784,39 @@
     busy.sort(function (a, b) { return a.s - b.s; });
   }
 
+  /* 排序规则。
+     【与后端 core/solver.py _sort_orders 语义严格对齐】
+       fifo → 交期优先（due 升序，无交期排最后），次键 -priority、-qty
+       spt  → 总工时升序，次键 sourceRow（后端用 id，此处行号即台账序，等价）
+       mwkr → 总工时降序，次键 sourceRow
+     edd / prio 只保留给 forceRule 调试用，**不进入默认候选集**（任务书表 8 只认三种）。 */
   function sortJobs(jobs, rule) {
     var k = jobs.map(function (j, i) { return { j: j, i: i }; });
     k.sort(function (a, b) {
       var A = a.j, B = b.j;
-      if (rule === 'fifo') return A.sourceRow - B.sourceRow || A.lotIdx - B.lotIdx;
-      if (rule === 'spt') return A.totalMin - B.totalMin || A.sourceRow - B.sourceRow;
-      if (rule === 'mwkr') return B.totalMin - A.totalMin || A.sourceRow - B.sourceRow;
-      if (rule === 'edd') {
-        var da = A.due === null ? Infinity : A.due, db = B.due === null ? Infinity : B.due;
-        return da - db || A.sourceRow - B.sourceRow;
+      var dueA = A.due === null ? Infinity : A.due;
+      var dueB = B.due === null ? Infinity : B.due;
+
+      if (rule === 'fifo') {
+        // 后端：sorted(key=(due or date.max, -priority, -qty))
+        return (dueA - dueB)
+          || (-(A.priority || 3) - (-(B.priority || 3)))
+          || (-(A.qty || 0) - (-(B.qty || 0)))
+          || (A.lotIdx - B.lotIdx)
+          || (A.sourceRow - B.sourceRow);
       }
-      // prio：急单优先，再按交期
+      if (rule === 'spt') {
+        return (A.totalMin - B.totalMin) || (A.sourceRow - B.sourceRow) || (A.lotIdx - B.lotIdx);
+      }
+      if (rule === 'mwkr') {
+        return (B.totalMin - A.totalMin) || (A.sourceRow - B.sourceRow) || (A.lotIdx - B.lotIdx);
+      }
+      if (rule === 'edd') {
+        return dueA - dueB || A.sourceRow - B.sourceRow;
+      }
+      // prio：急单优先，再按交期（仅供调试）
       var pa = -(A.priority || 3), pb = -(B.priority || 3);
-      var da2 = A.due === null ? Infinity : A.due, db2 = B.due === null ? Infinity : B.due;
-      return pa - pb || da2 - db2 || A.sourceRow - B.sourceRow;
+      return pa - pb || dueA - dueB || A.sourceRow - B.sourceRow;
     });
     return k.map(function (x) { return x.j; });
   }
@@ -798,7 +829,8 @@
     var jobs = sortJobs(model.jobs, rule);
     var ops = [], unplan = [];
 
-    jobs.forEach(function (job) {
+    /* 把单个 job 按工序链依次排完（把原 jobs.forEach 的函数体原样抽出来复用） */
+    function placeOne(job) {
       job.cursor = 0;
       if (job.release !== null) {
         var idx = cal.indexOnOrAfter(job.release);
@@ -840,7 +872,116 @@
         });
         job.cursor = end;
       }
+    }
+
+    /**
+     * C3 子批分组排程（对齐后端 place_flow_group）：
+     *   ① 同一订单的所有子批先各排一台车床 → 吃到多台车床的并行度
+     *   ② 再按「优先级降序 → 车完工升序」逐个排磨，紧贴车完工
+     *
+     * 【为什么要先排 flow】若让普通单先占磨床，磨床会被切碎，
+     * 阀芯C 一个子批都塞不进 30min 窗口（后端注释实测 10/10 失败）。
+     */
+    function placeFlowGroup(flowJobs) {
+      var stages = [];   // {job, carSt, grdSt, carEnd}
+
+      // ① 先排所有子批的「车」（第 1 道）
+      flowJobs.forEach(function (job) {
+        job.cursor = 0;
+        if (job.release !== null) {
+          var idx = cal.indexOnOrAfter(job.release);
+          if (idx !== null && idx > 0) job.cursor = idx * MIN_PER_DAY;
+        }
+        var carSt = job.steps[0];
+        if (!carSt) return;
+        var res = placeStep(job, carSt, state, cap, opts);
+        if (res.error) {
+          unplan.push({
+            orderId: job.orderId, lotId: job.lotId, seq: carSt.seq, op: carSt.op,
+            group: carSt.group, reason: res.error.reason,
+            blockingMachine: res.error.machine, suggestion: res.error.suggestion
+          });
+          // 车都排不进 → 这个子批两道工序都记为未排入，不许整单消失
+          job.steps.slice(1).forEach(function (st) {
+            unplan.push({
+              orderId: job.orderId, lotId: job.lotId, seq: st.seq, op: st.op,
+              group: st.group, reason: '前道未排入',
+              blockingMachine: res.error.machine, suggestion: res.error.suggestion
+            });
+          });
+          return;
+        }
+        var end = res.start + res.dur;
+        insertBusy(state[res.machine].busy, res.start, end);
+        ops.push({
+          orderId: job.orderId, lotId: job.lotId, lotIdx: job.lotIdx, seq: carSt.seq, op: carSt.op,
+          product: job.product, group: carSt.group, pinned: carSt.pinned, qty: job.qty,
+          minPerUnit: carSt.min, durationMin: res.dur, machine: res.machine,
+          startAxis: res.start, endAxis: end,
+          start: cal.toWall(res.start), end: cal.toWall(end),
+          startDate: cal.toClock(res.start).date, startTime: cal.toClock(res.start).time,
+          endDate: cal.toClock(end).date, endTime: cal.toClock(end).time,
+          status: 'scheduled', due: job.due, flow: true, tight: !!res.tight
+        });
+        job.cursor = end;
+        stages.push({ job: job, carSt: carSt, grdSt: job.steps[1] || null, carEnd: end, priority: job.priority || 3 });
+      });
+
+      // ② 磨床占用顺序 = 优先级降序 → 车完工升序（与后端一致）
+      stages.sort(function (a, b) {
+        return (b.priority - a.priority) || (a.carEnd - b.carEnd);
+      });
+
+      stages.forEach(function (sg) {
+        if (!sg.grdSt) return;
+        var job = sg.job;
+        job.cursor = sg.carEnd;
+        var res = placeFlowGrd(sg.grdSt, job, sg.carEnd, state, cap, opts);
+        if (res.error) {
+          unplan.push({
+            orderId: job.orderId, lotId: job.lotId, seq: sg.grdSt.seq, op: sg.grdSt.op,
+            group: sg.grdSt.group, reason: res.error.reason,
+            blockingMachine: res.error.machine, suggestion: res.error.suggestion
+          });
+          return;
+        }
+        var end = res.start + res.dur;
+        insertBusy(state[res.machine].busy, res.start, end);
+        ops.push({
+          orderId: job.orderId, lotId: job.lotId, lotIdx: job.lotIdx, seq: sg.grdSt.seq, op: sg.grdSt.op,
+          product: job.product, group: sg.grdSt.group, pinned: sg.grdSt.pinned, qty: job.qty,
+          minPerUnit: sg.grdSt.min, durationMin: res.dur, machine: res.machine,
+          startAxis: res.start, endAxis: end,
+          start: cal.toWall(res.start), end: cal.toWall(end),
+          startDate: cal.toClock(res.start).date, startTime: cal.toClock(res.start).time,
+          endDate: cal.toClock(end).date, endTime: cal.toClock(end).time,
+          status: 'scheduled', due: job.due, flow: true, tight: !!res.tight
+        });
+        job.cursor = end;
+      });
+    }
+
+    /* 执行顺序：flow 子批先抢磨床，其余单后填缝。
+       【关键 1】订单遍历顺序必须遵循 sortJobs 的结果（后端 flow_orders 就是
+       sorted_orders 过滤出来的）。用 jobs 原序会让 103/104 的先后反掉，
+       磨床占用顺序全错。
+       【关键 2】按「订单」逐个处理：一个订单的所有子批先一起排完车，再逐个排磨。 */
+    var flowJobs = jobs.filter(function (j) { return !!j.flow; });
+    var plainJobs = jobs.filter(function (j) { return !j.flow; });
+
+    var orderSeq = [];
+    flowJobs.forEach(function (j) {
+      if (orderSeq.indexOf(j.orderId) < 0) orderSeq.push(j.orderId);
     });
+    orderSeq.forEach(function (oid) {
+      var group = flowJobs.filter(function (j) { return j.orderId === oid; });
+      // 组内按子批序号排（后端 lots = sorted(key=lot_idx)）
+      group.sort(function (a, b) { return a.lotIdx - b.lotIdx; });
+      placeFlowGroup(group);
+    });
+
+    plainJobs.forEach(placeOne);
+
     ops.sort(function (a, b) { return a.startAxis - b.startAxis || (a.machine < b.machine ? -1 : 1); });
     var makespan = ops.reduce(function (a, o) { return Math.max(a, o.endAxis); }, 0);
     return { ops: ops, unplan: unplan, makespan: makespan, rule: rule, machines: state };
@@ -897,12 +1038,98 @@
 
     for (var c = 0; c < cand.length; c++) {
       var mid = cand[c];
-      var s = findSlot(state[mid].busy, earliest, dur);
-      if (best === null || s < best.start || (s === best.start && state[mid].busy.length < state[best.machine].busy.length)) {
-        best = { machine: mid, start: s };
+      var busy = state[mid].busy;
+      var s = findSlot(busy, earliest, dur);
+      if (s === null) continue;
+      /* 【与后端 place_lot 对齐】选机台判据 = (开始时刻, 该机累计负载) 字典序。
+         只按"开始最早"会把活全压到第一台机，另一台闲着，
+         导致后面的单整体后移（实测差 70min 级）。 */
+      var load = busy.reduce(function (a, b) { return a + (b.e - b.s); }, 0);
+      if (best === null || s < best.start || (s === best.start && load < best.load)) {
+        best = { machine: mid, start: s, load: load };
       }
     }
     return { machine: best.machine, start: best.start, dur: dur, tight: false };
+  }
+
+  /** 把某台机的占用区间转成空闲窗口 [{s, e}]，最后一段 e=null 表示无限长 */
+  function freeWindows(busy) {
+    var out = [];
+    var t = 0;
+    for (var i = 0; i < busy.length; i++) {
+      if (busy[i].s > t) out.push({ s: t, e: busy[i].s });
+      t = Math.max(t, busy[i].e);
+    }
+    out.push({ s: t, e: null });
+    return out;
+  }
+
+  /**
+   * 排 C3 的「磨」工序。严格对齐后端 place_flow_group 的 ②：
+   *   候选起点 = max(车完工 + gap, 窗口起点)，gap 依次取 [30,25,20,15,10,5,0]
+   *   **从大到小试，第一个放得下的就采用**（这是后端的实际行为，不是"越紧越好"）。
+   *   同时记录 (actual, start) 取字典序最小者（跨机台比较）。
+   * 全都放不下 → 退化为「顺排」，交 H5 报违规，绝不让整子批从风险清单消失。
+   */
+  function placeFlowGrd(grdSt, job, carEnd, state, cap, opts) {
+    var cand = candidatesOf(grdSt, cap, opts);
+    var dur = r0(grdSt.min * job.qty);
+    if (!cand.length) {
+      return {
+        error: {
+          reason: '流水约束：磨床无可用机台',
+          machine: grdSt.pinned || grdSt.group,
+          suggestion: '确认磨床状态 / 允许换机台'
+        }
+      };
+    }
+    var maxGap = (job.flow && job.flow.maxGap) || 30;
+    // 与后端一致：从大到小试（flow_interp 非 c 时末尾多一个 0）
+    var gapList = [30, 25, 20, 15, 10, 5, 0].filter(function (g) { return g <= maxGap; });
+    if (!gapList.length) gapList = [maxGap];
+
+    var best = null;
+    cand.forEach(function (mid) {
+      var busy = state[mid].busy;
+      // 该机台上的空闲窗口
+      var windows = freeWindows(busy);
+      for (var w = 0; w < windows.length; w++) {
+        var ws = windows[w].s, we = windows[w].e;
+        for (var gi = 0; gi < gapList.length; gi++) {
+          var gap = gapList[gi];
+          var start = Math.max(carEnd + gap, ws);
+          if (we !== null && start + dur > we) continue;
+          var actual = start - carEnd;
+          if (actual < 0 || actual > maxGap) continue;
+          var score = [actual, start];
+          if (best === null || score[0] < best.score[0] ||
+              (score[0] === best.score[0] && score[1] < best.score[1])) {
+            best = { machine: mid, start: start, dur: dur, gap: actual, tight: true, score: score };
+          }
+          break;   // 这个 gap 放得下就 break（与后端一致）
+        }
+        if (best && best.machine === mid) break;
+      }
+    });
+
+    if (best) return best;
+
+    /* 退化：顺排，从车完工起找最早可用位置（C3 由校验器判，不隐瞒） */
+    var fallback = null;
+    cand.forEach(function (mid) {
+      var s = findSlot(state[mid].busy, carEnd, dur);
+      var load = state[mid].busy.reduce(function (a, b) { return a + (b.e - b.s); }, 0);
+      if (fallback === null || s < fallback.start || (s === fallback.start && load < fallback.load)) {
+        fallback = { machine: mid, start: s, dur: dur, gap: s - carEnd, tight: false, load: load };
+      }
+    });
+    return fallback || {
+      error: {
+        reason: '磨床无可用窗口',
+        machine: cand[0],
+        suggestion: '启用 GRD-02 / 调整子批大小 / 顺延下一窗口'
+      }
+    };
   }
 
   /* ═══════════════════════════ 7. 独立校验器（四条硬约束 + C3） ═══════════════════════════ */
@@ -1078,6 +1305,7 @@
 
   var STATUS_CN = {
     ok: '准时', delayed: '延期', at_risk: '预警',
+    urgent_no_due: '急单·无交期',
     not_in_horizon: '未排入本周', unplannable: '排不进'
   };
 
@@ -1119,7 +1347,9 @@
         // 交期在窗口之后：本周排不排都不算延期（口径见设计文档 E3.2）
         status = 'not_in_horizon';
       } else if (dueAxis === null) {
-        status = 'ok';  // 无硬交期：只报预计完工
+        /* 无硬交期：客户催过的单（急单 / 交期写「尽快」，priority>=5）不能报「准时」，
+           否则最催的单显示准时，计划员会直接回客户「没问题」。只报预计完工。 */
+        status = (o.priority >= 5) ? 'urgent_no_due' : 'ok';
       } else if (endAxis > dueAxis) {
         status = 'delayed';
         delayDays = Math.max(1, Math.ceil((endAxis - dueAxis) / MIN_PER_DAY));
@@ -1140,6 +1370,10 @@
       var bs = last ? last.seq : (miss ? miss.seq : null);
       if (miss && !last) { bm = miss.blockingMachine; bo = miss.op; bs = miss.seq; }
 
+      var endLabel = complete ? (function () {
+        var c = cal.toClock(endAxis); return c.md + ' ' + c.time;
+      })() : '—';
+
       rows.push({
         orderId: o.id, idRaw: o.idRaw, customer: o.customer, product: o.product,
         qty: o.qty, qtyFull: o.qtyFull, qtyRaw: o.qtyRaw,
@@ -1148,9 +1382,7 @@
         inHorizon: inHorizon,
         plannedEndAxis: complete ? endAxis : null,
         plannedEnd: complete ? cal.toWall(endAxis) : null,
-        plannedEndLabel: complete ? (function () {
-          var c = cal.toClock(endAxis); return c.md + ' ' + c.time;
-        })() : '—',
+        plannedEndLabel: endLabel,
         status: status, statusCn: STATUS_CN[status],
         delayDays: delayDays,
         delayMd: delayDays === null ? '—' : '<span class="late">+' + delayDays + ' 天</span>',
@@ -1162,8 +1394,9 @@
         opsPlanned: planned, opsNeed: needOps,
         lots: myLots, lotsUnplannable: myLots.filter(function (l) { return (undone[l] || 0) > 0; }),
         unplanReason: miss ? miss.reason : null,
-        priority: o.priority, release: o.release, flags: o.flags,
-        suggestion: suggest(status, delayDays, last, miss, o)
+        priority: o.priority, release: o.release, flags: o.flags
+        /* suggestion 在产能表算完后统一回填：判断「本组到底缺不缺产能」要靠 gapRows，
+           而 gapRows 在指标卡那段才构建，这里算不出来。见 summarize 尾部。 */
       });
     });
 
@@ -1183,7 +1416,11 @@
       });
     });
 
-    var order = { ok: 0, delayed: 1, at_risk: 2, not_in_horizon: 3, unplannable: 4 };
+    /* 排序权重（数字越小越靠前）。
+       硬性要求：urgent_no_due 必须落在 at_risk(2) 与 not_in_horizon(3) 之间 —— 用 2.5 表示，
+       这样既不抢「预警」的紧急度，又排在「本周不排」之前。
+       原有 delayed/at_risk/not_in_horizon/unplannable/ok 的相对顺序与阈值一律不动。 */
+    var order = { ok: 0, delayed: 1, at_risk: 2, urgent_no_due: 2.5, not_in_horizon: 3, unplannable: 4 };
     rows.sort(function (a, b) {
       var d = order[a.status] - order[b.status];
       if (d !== 0) return d;
@@ -1241,6 +1478,26 @@
     // 按负荷排序，让超载的组排在上面
     gapRows.sort(function (a, b) { return b.util - a.util || a.group.localeCompare(b.group); });
 
+    /* 回填「建议动作」：要判断瓶颈机台所属组缺不缺产能，必须等 gapRows 算完。
+       一台机可能挂多个组（CNC-03 = 铣/镗），取第一个有容量的组。 */
+    var utilByGroup = {};
+    gapRows.forEach(function (r) { utilByGroup[r.group] = r; });
+    var groupUtilOfMachine = {};
+    Object.keys(cap.groups).forEach(function (g) {
+      (cap.groups[g].machines || []).forEach(function (id) {
+        if (groupUtilOfMachine[id]) return;
+        var r = utilByGroup[g];
+        if (r && r.capacity > 0) groupUtilOfMachine[id] = { util: r.util, over: r.over };
+      });
+    });
+    rows.forEach(function (row) {
+      if (row.blocked) return;   // 闸门行用清洗阶段给的原文案
+      var miss = sched.unplan.filter(function (u) { return u.orderId === row.orderId; })[0] || null;
+      row.suggestion = suggest(row.status, row.delayDays,
+                               { machine: row.bottleneckMachine }, miss, null,
+                               row.plannedEndLabel, groupUtilOfMachine);
+    });
+
     // 合计：机台口径（不重复）
     var totalCap = cap.usable.reduce(function (a, m) { return a + (dailyOf[m.id] || 0) * WINDOW_DAYS; }, 0);
     var groupGapSum = gapRows.reduce(function (a, r) { return a + r.gap; }, 0);
@@ -1251,6 +1508,7 @@
     var atRisk = rows.filter(function (r) { return r.status === 'at_risk'; }).length;
     var notInHorizon = rows.filter(function (r) { return r.status === 'not_in_horizon'; }).length;
     var unplannable = rows.filter(function (r) { return r.status === 'unplannable'; }).length;
+    var urgentNoDue = rows.filter(function (r) { return r.status === 'urgent_no_due'; }).length;
     var okN = rows.filter(function (r) { return r.status === 'ok'; }).length;
     var hard = rows.filter(function (r) { return r.inHorizon; }).length;
     var onTime = rows.filter(function (r) { return r.inHorizon && (r.status === 'ok' || r.status === 'at_risk'); }).length;
@@ -1263,7 +1521,7 @@
       groupGapSum: groupGapSum, groupFreeSum: groupFreeSum,
       counts: {
         delayed: delayed, atRisk: atRisk, notInHorizon: notInHorizon,
-        unplannable: unplannable, ok: okN, hard: hard, onTime: onTime
+        unplannable: unplannable, urgentNoDue: urgentNoDue, ok: okN, hard: hard, onTime: onTime
       },
       cardData: {
         makespanDays: makespanDays,
@@ -1274,14 +1532,25 @@
     };
   }
 
-  function suggest(status, delay, last, miss, o) {
+  function suggest(status, delay, last, miss, o, endLabel, groupUtil) {
     if (status === 'delayed') {
       var m = last ? last.machine : '';
-      if (/GRD/.test(m)) return '磨床是瓶颈：启用 GRD-02 / 与客户协商延期 ' + (delay || 1) + ' 天';
-      if (/CNC/.test(m)) return '铣削超载：与客户协商延期 ' + (delay || 1) + ' 天 / 外协部分铣削';
-      return '与客户协商延期 ' + (delay || 1) + ' 天';
+      /* 判断瓶颈机台所属组到底缺不缺产能：
+         有缺口才提「启用闲置机台」，没缺口说明是本组产能够、上游排队，
+         再让计划员去加机器就是给错原因（钻组 10837/11520 就属于这种）。 */
+      var gu = groupUtil && m ? groupUtil[m] : null;
+      if (gu && !gu.over) {
+        return '卡在 ' + m + '：本组产能够（利用率 ' + Math.round(gu.util * 100) + '%），是上游工序排队；缩短前道或调大 --lot-size';
+      }
+      if (/GRD/.test(m)) return '卡在 ' + m + '：启用闲置机台 / 与客户协商延期 ' + (delay || 1) + ' 天 / 调大 --lot-size';
+      if (/CNC/.test(m)) return '卡在 ' + m + '：启用闲置机台 / 与客户协商延期 ' + (delay || 1) + ' 天 / 调大 --lot-size';
+      return '卡在 ' + m + '：启用闲置机台 / 与客户协商延期 ' + (delay || 1) + ' 天 / 调大 --lot-size';
     }
     if (status === 'at_risk') return '余量不足一个班次，提前确认物料与人员';
+    if (status === 'urgent_no_due') {
+      /* 严禁编造交期日期：只说实际完工，让客户自己定哪天要 */
+      return '无硬交期但客户催过；已排 ' + (endLabel || '—') + ' 完工，需回客户确认具体哪天要';
+    }
     if (status === 'not_in_horizon') return '交期在窗口外，建议顺延到下一周窗口，本周不排不算延期';
     if (status === 'unplannable') {
       if (miss && /GRD|磨/.test(miss.blockingMachine + miss.reason)) return '磨床无有效窗口：启用 GRD-02 / 调整 lot_size / 顺延';
@@ -1330,7 +1599,10 @@
     model.jobs.forEach(function (j) { model.jobQty[j.lotId] = j.qty; });
 
     stage('规则排程', 0.6);
-    var rules = opts.forceRule ? [opts.forceRule] : ['prio', 'edd', 'fifo', 'spt', 'mwkr'];
+    /* 与后端 core/config.ALGO_CANDIDATES 完全一致：FIFO / SPT / MWKR 三种，取最好。
+       任务书表 8 第 4 行「规则排程（FIFO/SPT/MWKR 取最好）」是硬性验收标准，
+       prio / edd 不再进入默认候选集（保留在 sortJobs 里仅供 forceRule 调试）。 */
+    var rules = opts.forceRule ? [opts.forceRule] : ['fifo', 'spt', 'mwkr'];
     var best = null;
     var tried = [];
     rules.forEach(function (rule) {
@@ -1503,7 +1775,7 @@
         sourceFile: opts.sourceFile || '宏达精密_订单台账.xlsx',
         elapsed: x.elapsed,
         rule: sched.rule,
-        ruleCn: { prio: '急单优先', edd: '最早交期优先', fifo: '先来先到', spt: '短工时优先', mwkr: '长工时优先' }[sched.rule] || sched.rule,
+        ruleCn: { prio: '急单优先', edd: '最早交期优先', fifo: '交期优先', spt: '最短工时优先', mwkr: '最长工时优先' }[sched.rule] || sched.rule,
         horizon: {
           start: fmtDate(x.startNum), startCn: fmtDateCn(x.startNum),
           end: fmtDate(cal.dayAt(WINDOW_DAYS - 1)), endCn: fmtDateCn(cal.dayAt(WINDOW_DAYS - 1)),
@@ -1562,9 +1834,27 @@
     };
   }
 
+  /**
+   * 规则择优打分。返回数组按字典序比较，前面几位必须与后端
+   * core/solver.py pick_best 完全一致，否则两边会选出不同的规则。
+   *
+   * 返回结构（每一位的含义，顺序不可调换）：
+   *   [0] 未排入 lot 数      ← 后端 len(unplannable)
+   *   [1] 延期单数           ← 后端 eval.delayed
+   *   [2] 总延期分钟         ← 后端 eval.total_delay_min
+   *   [3] makespan（分钟）    ← 后端 eval.makespan_min
+   *   ---- 以下为前端额外加的并列次键，后端没有 ----
+   *   [4] 急单平均完工轴分钟  （仅在 0~3 全平时才起作用）
+   */
   function quickScore(model, sched, opts) {
     var cal = opts.cal;
-    var delayed = 0, tardy = 0, hard = 0, urgentEnd = 0, urgentN = 0;
+
+    // [0] 未排入 lot 数：有任一工序没排进去的 lot 就算一个
+    var lotsWithUnplan = {};
+    sched.unplan.forEach(function (u) { lotsWithUnplan[u.lotId] = true; });
+    var unplanLots = Object.keys(lotsWithUnplan).length;
+
+    var delayed = 0, delayMin = 0, urgentEnd = 0, urgentN = 0;
     var lotEnd = {}, lotNeed = {};
     model.jobs.forEach(function (j) { lotNeed[j.lotId] = j.steps.length; });
     var lotDone = {};
@@ -1577,16 +1867,15 @@
       var complete = lots.length > 0 && lots.every(function (l) { return (lotDone[l] || 0) >= lotNeed[l]; });
       if (!complete) return;
       var end = lots.reduce(function (a, l) { return Math.max(a, lotEnd[l] || 0); }, 0);
-      // 急单（备注急单 / 交期写「尽快」）必须尽早，否则「尽快=最急」这条口头规则就废了
       if (o.priority >= 5 || o.dueKind === 'asap') { urgentEnd += end; urgentN++; }
       var di = o.due === null ? null : cal.indexOnOrAfter(o.due);
       if (di === null || di < 0 || di > WINDOW_DAYS - 1) return;
-      hard++;
       var dueAxis = di * MIN_PER_DAY + (DUE_HOUR - ORIGIN_HOUR) * 60;
-      if (end > dueAxis) { delayed++; tardy += (end - dueAxis) / MIN_PER_DAY; }
+      if (end > dueAxis) { delayed++; delayMin += (end - dueAxis); }
     });
-    // 字典序：延期单数 → 急单平均完工 → 平均迟到天数 → 未排入工序数 → makespan
-    return [delayed, urgentN ? Math.round(urgentEnd / urgentN) : 0, hard ? Math.round((tardy / hard) * 100) : 0, sched.unplan.length, r0(sched.makespan)];
+
+    return [unplanLots, delayed, delayMin, r0(sched.makespan),
+            urgentN ? r0(urgentEnd / urgentN) : 0];
   }
 
   /** 字典序比较：a 更优返回 true */

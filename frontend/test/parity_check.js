@@ -163,8 +163,34 @@ function post(port, fileBuf, filename, options) {
   console.log('  · 前端总体: ' + feOverall + '  | 后端总体: ' + beOverall);
   cmp('总体结论', feOverall, beOverall);
 
-  // ---------- 5. 风险分类 ----------
-  console.log('\n── 5. 风险清单分类 ──');
+  // ---------- 5b. 完工日期与 best_rule（本轮新增，专抓「同一单两个答案」） ----------
+  console.log('\n── 5b. 完工日期 & 选中的规则 ──');
+  // 选中规则：前端 meta.rule 是小写（fifo），后端是 FIFO
+  const feRule = String((R.meta && R.meta.rule) || '').toUpperCase();
+  const beRule = String(B.meta.best_rule || (B.metrics && B.metrics.best_rule) || '').toUpperCase();
+  cmp('选中的 best_rule', feRule, beRule);
+
+  // 每单预计完工：前端 summary[].plannedEndLabel，后端 risks[].planned_end
+  const feEnd = {};
+  ((R.risk && R.risk.rows) || []).forEach(r => { feEnd[r.orderId] = r.plannedEndLabel; });
+  const beEnd = {};
+  (B.risks || []).forEach(r => { beEnd[r.order_id] = r.planned_end; });
+
+  const allIds = Array.from(new Set([...Object.keys(feEnd), ...Object.keys(beEnd)])).sort();
+  const normEnd = (v) => (v === undefined || v === null || v === '' || v === '—') ? '—' : String(v);
+  let endMismatch = 0;
+  allIds.forEach(id => {
+    const a = normEnd(feEnd[id]);
+    const b = normEnd(beEnd[id]);
+    if (a !== b) {
+      endMismatch++;
+      console.log('  ✗ 完工不一致  ' + id.padEnd(16) + ' 前端=' + String(a).padEnd(16) + ' 后端=' + b);
+    }
+  });
+  cmp('全部 ' + allIds.length + ' 单的「预计完工」逐单一致', endMismatch, 0);
+
+  // ---------- 6. 风险分类 ----------
+  console.log('\n── 6. 风险清单分类 ──');
   const feRisk = {};
   const feRows = (R.risk && R.risk.rows) || [];
   feRows.forEach(r => {
@@ -178,10 +204,10 @@ function post(port, fileBuf, filename, options) {
   const beRisk = {};
   (B.risks || []).forEach(r => { beRisk[r.type] = (beRisk[r.type] || 0) + 1; });
 
-  ['delayed', 'at_risk', 'not_in_horizon', 'not_scheduled_in_horizon',
+  ['delayed', 'at_risk', 'urgent_no_due', 'not_in_horizon', 'not_scheduled_in_horizon',
    'unplannable'].forEach(k => {
     const a = feRisk[k] || 0, b = beRisk[k] || 0;
-    // 硬指标（延期/排不进）必须完全一致；
+    // 硬指标（延期/排不进/急单无交期）必须完全一致；
     // 预警(at_risk) 属于排程细节，后端不应比前端【差】即可（后端更优是允许的）
     if (k === 'at_risk') {
       const fine = b <= a;
