@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>宏达精密 · 本地排产助手</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ═════════════ ① 标题栏 ═════════════ -->
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <span class="brand-mark">宏</span>
+      <div class="brand-text">
+        <h1>宏达精密 · 本地排产助手</h1>
+        <p>把台账丢进来，点一下，出周排单表 / 甘特图 / 交期风险 / 数据体检</p>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span class="badge-local" title="所有计算都在浏览器里完成，台账不上传、不联网">纯本地运行 · 数据不上传</span>
+      <span class="ver">v1.0.0</span>
+    </div>
+  </div>
+</header>
+
+<!-- ═════════════ ② 主界面（上传 + 参数 + 生成） ═════════════ -->
+<main id="viewHome" class="view is-active">
+  <div class="page">
+
+    <!-- 空态：还没选文件时，这里说明它要什么 -->
+    <section class="card" id="cardUpload">
+      <div class="card-head">
+        <span class="idx">①</span>
+        <h2>上传台账</h2>
+        <span class="hint">支持「宏达精密_订单台账.xlsx」；需含三个工作表：订单 / 设备 / 工艺路线</span>
+      </div>
+
+      <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="选择或拖入台账文件">
+        <svg class="dz-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 16V4m0 0L7 9m5-5 5 5" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+        </svg>
+        <p class="dz-title">把台账 .xlsx 拖到这里，或 <span class="link">点击选择文件</span></p>
+        <p class="dz-sub">台账原样传上来即可，脏数据（单号三种写法、交期写「尽快」、数量空白、停机设备）由程序逐条清洗并记录</p>
+        <input type="file" id="fileInput" accept=".xlsx,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden>
+      </div>
+
+      <div class="filepick" id="filepick" hidden>
+        <span class="filepick-icon">📄</span>
+        <span class="filepick-name" id="fileName">—</span>
+        <span class="filepick-size" id="fileSize"></span>
+        <span class="filepick-meta" id="fileMeta"></span>
+        <button class="btn btn-ghost btn-sm" id="btnRepick" type="button">换一个</button>
+      </div>
+
+      <div class="alert alert-error" id="uploadError" hidden>
+        <div class="alert-title" id="errTitle">文件不对</div>
+        <div class="alert-body" id="errBody"></div>
+        <details class="alert-detail"><summary>查看详情</summary><pre id="errDetail"></pre></details>
+      </div>
+    </section>
+
+    <!-- 参数区 -->
+    <section class="card" id="cardParams">
+      <div class="card-head">
+        <span class="idx">②</span>
+        <h2>排程参数</h2>
+        <span class="hint">默认值都是保守口径；改一个数，下面这行「本次参数」会立刻跟着变</span>
+      </div>
+
+      <div class="params">
+        <label class="field">
+          <span class="field-label">排程起始日</span>
+          <input type="date" id="optStart" class="input" disabled>
+          <span class="field-help" id="startHelp">自动取「台账整理日之后最近的周一」，可手改</span>
+        </label>
+
+        <div class="field">
+          <span class="field-label">允许换机台</span>
+          <div class="seg" data-name="allowSwap">
+            <button type="button" data-val="1" class="on">是</button>
+            <button type="button" data-val="0">否</button>
+          </div>
+          <span class="field-help">工艺写「车（LAT）」= 组内任选；写「铣（CNC-03）」= 点名。选「是」时，点名机台停机会改用同组可用机</span>
+        </div>
+
+        <div class="field">
+          <span class="field-label">允许用闲置磨床 GRD-02</span>
+          <div class="seg" data-name="enableGrd02">
+            <button type="button" data-val="1">是</button>
+            <button type="button" data-val="0" class="on">否</button>
+          </div>
+          <span class="field-help">台账写「磨（GRD-01）」是点名；打开等于替客户决定换机，磨缺口 6590 → 830 min</span>
+        </div>
+
+        <div class="field">
+          <span class="field-label">假设 CNC-03 已修好</span>
+          <div class="seg" data-name="enableCnc03">
+            <button type="button" data-val="1">是</button>
+            <button type="button" data-val="0" class="on">否</button>
+          </div>
+          <span class="field-help">设备表写「停机维修（11/8 起）」，默认当它本周不可用</span>
+        </div>
+
+        <div class="field">
+          <span class="field-label">空数量怎么办</span>
+          <div class="seg" data-name="emptyQty">
+            <button type="button" data-val="skip" class="on">跳过并提示</button>
+            <button type="button" data-val="zero">按 0 排</button>
+            <button type="button" data-val="error">直接报错</button>
+          </div>
+          <span class="field-help">HD-2026-110 数量空白。默认不猜数字，进「排不进」并标「待客户确认」</span>
+        </div>
+
+        <label class="field">
+          <span class="field-label">阀芯C 子批大小</span>
+          <div class="inline">
+            <input type="number" id="optLot" class="input input-num" min="5" max="500" step="5" value="20" disabled>
+            <span class="unit">件</span>
+          </div>
+          <span class="field-help">只用于阀芯C（车→磨 ≤30min 流水约束）。10~200 之间</span>
+        </label>
+
+        <div class="field">
+          <span class="field-label">流水约束</span>
+          <div class="seg" data-name="flowOn">
+            <button type="button" data-val="1" class="on">开</button>
+            <button type="button" data-val="0">关</button>
+          </div>
+          <span class="field-help">关掉后阀芯C 按普通批排，C3 校验项自动跳过</span>
+        </div>
+      </div>
+
+      <div class="param-foot">
+        <button class="btn btn-ghost" type="button" id="btnReset">恢复默认</button>
+        <span class="param-foot-note">参数不会上传，只在本页内存里</span>
+      </div>
+    </section>
+
+    <!-- 生成按钮 + 状态 -->
+    <section class="run">
+      <button class="btn btn-primary btn-lg" id="btnRun" type="button" disabled>
+        <span class="btn-label">开始排程</span>
+        <span class="spinner" hidden></span>
+      </button>
+      <div class="status" id="status" data-tone="idle">
+        <span class="status-dot"></span>
+        <span class="status-text" id="statusText">请先选择台账文件</span>
+      </div>
+    </section>
+
+    <!-- ⑤ 参数行（手册 §3.4：每次输出必须打印一行本次参数） -->
+    <div class="paramline" id="paramline">本次参数：等待生成…</div>
+  </div>
+</main>
+
+<!-- ═════════════ ③ 结果页 ═════════════ -->
+<main id="viewResult" class="view">
+  <div class="page">
+    <div class="result-bar">
+      <button class="btn btn-ghost btn-sm" id="btnBack" type="button">← 返回</button>
+      <div class="result-title">
+        <strong>排程结果</strong>
+        <span class="result-file" id="resultFile"></span>
+      </div>
+      <div class="result-actions">
+        <button class="btn btn-ghost btn-sm" id="btnPrint" type="button">打印</button>
+        <button class="btn btn-primary btn-sm" id="btnExport" type="button">下载全部（csv）</button>
+      </div>
+    </div>
+
+    <!-- 校验横幅 -->
+    <div class="banner" id="verifyBanner"></div>
+
+    <!-- 六张指标卡 -->
+    <section class="cards" id="cards"></section>
+
+    <!-- 四个页签 -->
+    <div class="tabs" role="tablist">
+      <button class="tab is-active" data-tab="gantt" role="tab">甘特图</button>
+      <button class="tab" data-tab="orders" role="tab">排单表</button>
+      <button class="tab" data-tab="risk" role="tab">交期风险<span class="tab-badge" id="tabBadgeRisk">0</span></button>
+      <button class="tab" data-tab="health" role="tab">数据体检<span class="tab-badge" id="tabBadgeHealth">0</span></button>
+      <button class="tab" data-tab="capacity" role="tab">产能核对</button>
+    </div>
+
+    <!-- 甘特 -->
+    <section class="panel is-active" data-panel="gantt">
+      <div class="panel-head">
+        <h3>设备 × 时间（每格一班 8 小时，深色竖线是日界）</h3>
+        <div class="legend">
+          <span><i class="sw sw-saw"></i>下料</span>
+          <span><i class="sw sw-lat"></i>车</span>
+          <span><i class="sw sw-cnc"></i>铣</span>
+          <span><i class="sw sw-drl"></i>钻</span>
+          <span><i class="sw sw-grd"></i>磨</span>
+          <span><i class="sw sw-flow"></i>阀芯C 流水紧贴</span>
+        </div>
+      </div>
+      <p class="panel-note">把鼠标放到色块上看单号 / 工序 / 起止时刻。<b>GRD-01 是瓶颈</b>：全部磨工序压在它一台机上，颜色会一直排到窗口之外。</p>
+      <div class="gantt-wrap" id="gantt"></div>
+    </section>
+
+    <!-- 排单表 -->
+    <section class="panel" data-panel="orders">
+      <div class="panel-head">
+        <h3 id="ordersTitle">排单表</h3>
+        <div class="panel-tools">
+          <input type="search" class="input input-sm" id="ordersSearch" placeholder="搜单号 / 机台 / 工序 / 产品" disabled>
+        </div>
+      </div>
+      <p class="panel-note">列名与任务书一致：机台 / 单号 / 工序 / 数量 / 开工 / 完工 / 工时。点表头可排序；延期单行左侧有红边。</p>
+      <div class="table-wrap" id="ordersTable"></div>
+    </section>
+
+    <!-- 风险清单 -->
+    <section class="panel" data-panel="risk">
+      <div class="panel-head">
+        <h3>交期风险清单</h3>
+      </div>
+      <div class="filters" id="riskFilters"></div>
+      <p class="panel-note">点任意一行 → 跳到排单表并高亮该单的全部工序（这就是「抽一条风险回排单表核对」的交互）。</p>
+      <div class="table-wrap" id="riskTable"></div>
+      <div class="footnotes">
+        <p><b>延期</b>：已排入，且预计完工晚于交期（当日 17:00）——这是要打电话跟客户解释的。</p>
+        <p><b>预警</b>：已排入，但余量不足一个班次（480 min）。</p>
+        <p><b>未排入本周</b>：交期在窗口之后，本周不排，<b>不算延期</b>；带 * 的交期是推算值（如「月底前」→ 11-30）。</p>
+        <p><b>排不进</b>：数量/工艺缺失，或产能与流水约束下无法安排，需要决策。</p>
+      </div>
+    </section>
+
+    <!-- 数据体检 -->
+    <section class="panel" data-panel="health">
+      <div class="panel-head">
+        <h3>数据体检报告</h3>
+        <div class="panel-tools"><span class="muted" id="healthSummary"></span></div>
+      </div>
+      <p class="panel-note">台账里每一处被改动的地方都记在这里：类别、位置、「台账原样」、怎么处理、要不要问客户。凡是影响交期承诺的，都标「需客户确认」。</p>
+      <div id="healthBody"></div>
+    </section>
+
+    <!-- 产能核对 -->
+    <section class="panel" data-panel="capacity">
+      <div class="panel-head">
+        <h3>产能核对（负荷 vs 窗口容量）</h3>
+      </div>
+      <p class="panel-note">口径：每台可用机 6 个工作日 × 960 min（两班）。负荷 = 单件工时 × 数量，逐工序累加。这是「任何排法都做不完」的硬证据，与算法无关。</p>
+      <div id="capacityBody"></div>
+    </section>
+  </div>
+</main>
+
+<footer class="footer">
+  <span>宏达精密 · 简化版 APS</span>
+  <span class="dot">·</span>
+  <span>纯本地单文件运行，不需要装 Python / Node / 数据库</span>
+  <span class="dot">·</span>
+  <span id="footStamp"></span>
+</footer>
+
+<script src="xlsx-lite.js"></script>
+<script src="engine.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
