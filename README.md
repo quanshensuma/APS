@@ -78,7 +78,7 @@ python tests/test_core.py
 ```
 aps-scheduler/
 ├── config.py          常驻配置（班次、日历、交期口径、机台、工艺路线）
-├── run.py             命令行入口（后端，出四件产物）
+├── run.py             命令行入口（后端，出七件产物）
 │
 ├── core/              排程核心（纯 Python，不依赖 web）
 │   ├── workcal.py     轴分钟 ↔ 挂钟时刻（跳过夜间和周日）
@@ -87,7 +87,9 @@ aps-scheduler/
 │   ├── instance.py    订单 → 工序任务（分钟/件 × 数量）
 │   ├── checker.py     校验器（H1~H5，独立，不 import solver）
 │   ├── solver.py      规则排程（FIFO/SPT/MWKR 取最好）+ C3 子批流水
-│   └── report.py      四件产物
+│   ├── report.py      排单表/甘特图/风险清单/体检/校验
+│   ├── confirm.py     需求确认单（PPT 第 9 页第 1 件交付物）
+│   └── handover.py    交接说明（参数/假设/局限，随运行自动更新）
 │
 ├── server/            本地服务（标准库 http.server，托管前端 + 3 个 API）
 │   └── app.py         python server/app.py --port 8801
@@ -98,7 +100,8 @@ aps-scheduler/
 │   ├── engine.js      纯 JS 排程引擎（与 core/ 口径对齐）
 │   ├── style.css      样式
 │   ├── xlsx-lite.js   纯前端 xlsx 解析
-│   └── test/          parity_check.js 前后端一致性对比
+│   ├── datasource.js  数据源适配层（file:// 走本地引擎 / http 走后端 API）
+│   └── test/          parity_check 一致性 + smoke 三件套冒烟
 │
 ├── tests/             后端单测（test_core.py，46 条）
 ├── docs/              设计文档（N2）
