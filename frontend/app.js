@@ -520,6 +520,8 @@
     var R = unified.R;
     state.result = R;
     state.unified = unified;
+    // 暴露最近一次结果，供样例回归测试直接核对引擎输出（不改任何业务逻辑）
+    window.__apsLastResult = R;
 
     $('#resultFile').textContent = unified.sourceFile || (R.meta && R.meta.sourceFile) || '';
     showFreshness(unified);

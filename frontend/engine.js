@@ -95,14 +95,33 @@
    */
   function makeCalendar(startNum) {
     var days = [];
+    /* 【与后端 workcal 对齐】日历最多延伸到 36 个工作日（6×6）。
+       注意后端的真实行为：_max_days 只在【日历首次扩展时】检查，
+       一旦某次 extend 成功把日历撑到 N 天，后续就不再受 36 约束
+       （实测 sample4 日历被撑到 70 天，排程正常产出）。
+       所以这里用「已扩展到的天数」做软上限，而不是硬卡 36。 */
+    var MAX_DAYS = WINDOW_DAYS * 6;
     return {
       start: startNum,
-      /** 第 i 个工作日（i >= 0），自动向后扩展 */
+      maxDays: MAX_DAYS,
+      /** 当前日历已扩展到第几个工作日（用于容量闸门，与后端 extend 行为一致） */
+      dayCount: function () { return days.length; },
+      /** 第 i 个工作日（i >= 0），自动向后扩展；超出上限抛错
+       *  【与后端 day_at 严格对齐】后端是「先 append 再检查」：
+       *  所以每次触发超限，都会先让日历多长 1 天再抛错。
+       *  多次失败尝试 → 日历逐步撑长（实测 sample4 撑到 70 天），
+       *  这正是后端能把超载单排到几个月后的原因。 */
       dayAt: function (i) {
         while (days.length <= i) {
           var c = days.length === 0 ? startNum : days[days.length - 1] + 1;
           while (dow(c) === WEEK_OFF) c++;
-          days.push(c);
+          days.push(c);                       // 先追加（与后端同序）
+          if (days.length > MAX_DAYS) {      // 再检查
+            var e = new Error('排程超出 ' + MAX_DAYS + ' 个工作日，产能严重不足');
+            e.title = '排不进';
+            e.userMessage = '排程超出 ' + MAX_DAYS + ' 个工作日，产能严重不足';
+            throw e;
+          }
         }
         return days[i];
       },
@@ -133,12 +152,19 @@
         while (dow(c) === WEEK_OFF) c++;
         return this.indexOf(c);
       },
-      /** 轴分钟 → 挂钟 'YYYY-MM-DDTHH:MM' */
+      /** 轴分钟 → 挂钟 'YYYY-MM-DDTHH:MM'
+       *  日历撑不开时返回占位而不抛错 —— 真正的「排不进」判定在 capCheck 里做，
+       *  这里只负责把已经排定的时刻显示出来。 */
       toWall: function (axis) {
         var i = Math.floor(axis / MIN_PER_DAY);
         var inDay = axis - i * MIN_PER_DAY;
         var clock = ORIGIN_HOUR * 60 + inDay;
-        var d = this.dayAt(Math.max(0, i));
+        var d;
+        try {
+          d = this.dayAt(Math.max(0, i));
+        } catch (e) {
+          return '—';
+        }
         if (i < 0) d = this.dayAt(0) - (0 - i) * 2;
         var hh = Math.floor(clock / 60), mm = Math.round(clock % 60);
         // 24:00 归到当日末，避免出现 24:xx
@@ -150,7 +176,12 @@
         var i = Math.floor(axis / MIN_PER_DAY);
         var inDay = axis - i * MIN_PER_DAY;
         var clock = ORIGIN_HOUR * 60 + inDay;
-        var d = this.dayAt(Math.max(0, i));
+        var d;
+        try {
+          d = this.dayAt(Math.max(0, i));
+        } catch (e) {
+          return { date: '—', md: '—', time: '—', dayIndex: i };
+        }
         var hh = Math.floor(clock / 60), mm = Math.round(clock % 60);
         if (hh >= 24) { hh -= 24; mm = 0; }
         return { date: fmtDate(d), md: fmtMd(d), time: pad2(hh) + ':' + pad2(mm), dayIndex: i };
@@ -518,6 +549,7 @@
     var orders = [];
     var blocked = [];
     var usedIds = {};
+    var dupCount = {};   // 原单号 → 已重命名次数（第 2 次出现=1 → -R2）
     var blankQtyCount = 0;
 
     parsed.forEach(function (r) {
@@ -539,15 +571,22 @@
         symptom: '单号写法不规范：' + str(r.id) + ' → ' + id, handling: '统一格式，不改变业务含义'
       });
       if (usedIds[id]) {
-        var newId = id + '-R2';
+        /* 【关键】递增改名 -R2 / -R3 / -Rn：
+           同一单号出现 14 次时若都叫 -R2，lot_id 会同名，
+           instance 分组时互相覆盖，多个单塌缩成一个，排程结果整列相同。
+           dupCount 记「原单号已重命名次数」，与 usedIds（记录首次出现行号）分开。 */
+        dupCount[id] = (dupCount[id] || 0) + 1;
+        var n = dupCount[id] + 1;
+        var newId = id + '-R' + n;
         addIssue(issues, {
           code: 'ID_DUP', sheet: '订单', locator: '订单!A' + r.__row, severity: 'warn', askCustomer: true,
           symptom: '单号 ' + id + ' 与第 ' + usedIds[id] + ' 行重复（数量不同）',
-          handling: '视为追加批，改名 ' + newId + ' 单独排；需客户确认是否合并'
+          handling: '视为追加批，改名 ' + newId + ' 单独排（不合并）；需客户确认是否合并'
         });
         id = newId;
+      } else {
+        usedIds[id] = r.__row;
       }
-      usedIds[id] = r.__row;
       if (!route) {
         blocked.push({
           orderId: id, severity: 'block', reason: '工艺路线缺失',
@@ -787,15 +826,25 @@
   /* 排序规则。
      【与后端 core/solver.py _sort_orders 语义严格对齐】
        fifo → 交期优先（due 升序，无交期排最后），次键 -priority、-qty
-       spt  → 总工时升序，次键 sourceRow（后端用 id，此处行号即台账序，等价）
-       mwkr → 总工时降序，次键 sourceRow
+       spt  → 【订单总工时】升序，次键 订单 id（字典序）
+       mwkr → 【订单总工时】降序，次键 订单 id（字典序）
+     【关键】后端的 _total_min 是「该订单下所有 lot 的工时之和」，
+     不是单个子批的工时。前端原先用子批工时，导致 SPT/MWKR 的订单先后
+     与后端不同，选出的规则与排程结果也就不同（实测 sample4）。
      edd / prio 只保留给 forceRule 调试用，**不进入默认候选集**（任务书表 8 只认三种）。 */
   function sortJobs(jobs, rule) {
+    // 订单总工时（与后端 totals 一致）
+    var orderTotal = {};
+    jobs.forEach(function (j) {
+      orderTotal[j.orderId] = (orderTotal[j.orderId] || 0) + (j.totalMin || 0);
+    });
     var k = jobs.map(function (j, i) { return { j: j, i: i }; });
     k.sort(function (a, b) {
       var A = a.j, B = b.j;
       var dueA = A.due === null ? Infinity : A.due;
       var dueB = B.due === null ? Infinity : B.due;
+      var tA = orderTotal[A.orderId] || 0;
+      var tB = orderTotal[B.orderId] || 0;
 
       if (rule === 'fifo') {
         // 后端：sorted(key=(due or date.max, -priority, -qty))
@@ -806,10 +855,11 @@
           || (A.sourceRow - B.sourceRow);
       }
       if (rule === 'spt') {
-        return (A.totalMin - B.totalMin) || (A.sourceRow - B.sourceRow) || (A.lotIdx - B.lotIdx);
+        // 后端：sorted(key=(_total_min, id))  —— id 是订单号，字典序
+        return (tA - tB) || cmpStr(A.orderId, B.orderId) || (A.lotIdx - B.lotIdx);
       }
       if (rule === 'mwkr') {
-        return (B.totalMin - A.totalMin) || (A.sourceRow - B.sourceRow) || (A.lotIdx - B.lotIdx);
+        return (tB - tA) || cmpStr(A.orderId, B.orderId) || (A.lotIdx - B.lotIdx);
       }
       if (rule === 'edd') {
         return dueA - dueB || A.sourceRow - B.sourceRow;
@@ -821,6 +871,12 @@
     return k.map(function (x) { return x.j; });
   }
 
+  /** 字符串字典序比较（与 Python 的 str 比较一致） */
+  function cmpStr(a, b) {
+    a = String(a); b = String(b);
+    return a < b ? -1 : (a > b ? 1 : 0);
+  }
+
   function solve(model, cap, opts, rule) {
     var cal = opts.cal;
     var state = {};
@@ -829,49 +885,47 @@
     var jobs = sortJobs(model.jobs, rule);
     var ops = [], unplan = [];
 
-    /* 把单个 job 按工序链依次排完（把原 jobs.forEach 的函数体原样抽出来复用） */
+    /* 把单个 job 按工序链依次排完（把原 jobs.forEach 的函数体原样抽出来复用）
+       【原子操作，对齐后端 place_lot】任一道工序排不进 → 整条 lot 放弃：
+         · 不占用前面工序的机台（后端用 staged 暂存，全成功才 occupy）
+         · 只记 1 条未排入记录（后端 _unplannable_rec 也是一条/lot）
+       否则失败一个 lot 会占着机台不放、记录数还偏多，两端口径就不一致。 */
     function placeOne(job) {
       job.cursor = 0;
       if (job.release !== null) {
         var idx = cal.indexOnOrAfter(job.release);
         if (idx !== null && idx > 0) job.cursor = idx * MIN_PER_DAY;
       }
-      var failed = null;
+      var staged = [];   // 暂存：{step, res, dur, end}
       for (var i = 0; i < job.steps.length; i++) {
         var st = job.steps[i];
-        if (failed) {
-          unplan.push({
-            orderId: job.orderId, lotId: job.lotId, seq: st.seq, op: st.op,
-            group: st.group, reason: failed.reason, blockingMachine: failed.machine,
-            suggestion: failed.suggestion
-          });
-          continue;
-        }
         var res = placeStep(job, st, state, cap, opts);
         if (res.error) {
-          failed = res.error;
+          // 整条 lot 放弃：只记一条，不占用任何机台
           unplan.push({
             orderId: job.orderId, lotId: job.lotId, seq: st.seq, op: st.op,
-            group: st.group, reason: failed.reason, blockingMachine: failed.machine,
-            suggestion: failed.suggestion
+            group: st.group, reason: res.error.reason,
+            blockingMachine: res.error.machine, suggestion: res.error.suggestion
           });
-          continue;
+          return;
         }
-        var dur = res.dur;
-        var end = res.start + dur;
-        insertBusy(state[res.machine].busy, res.start, end);
-        ops.push({
-          orderId: job.orderId, lotId: job.lotId, lotIdx: job.lotIdx, seq: st.seq, op: st.op,
-          product: job.product, group: st.group, pinned: st.pinned, qty: job.qty,
-          minPerUnit: st.min, durationMin: dur, machine: res.machine,
-          startAxis: res.start, endAxis: end,
-          start: cal.toWall(res.start), end: cal.toWall(end),
-          startDate: cal.toClock(res.start).date, startTime: cal.toClock(res.start).time,
-          endDate: cal.toClock(end).date, endTime: cal.toClock(end).time,
-          status: 'scheduled', due: job.due, flow: !!job.flow, tight: !!res.tight
-        });
-        job.cursor = end;
+        staged.push({ st: st, res: res, dur: res.dur, end: res.start + res.dur });
+        job.cursor = res.start + res.dur;
       }
+      // 全部排得下 → 统一占用机台并落账
+      staged.forEach(function (sg) {
+        insertBusy(state[sg.res.machine].busy, sg.res.start, sg.end);
+        ops.push({
+          orderId: job.orderId, lotId: job.lotId, lotIdx: job.lotIdx, seq: sg.st.seq, op: sg.st.op,
+          product: job.product, group: sg.st.group, pinned: sg.st.pinned, qty: job.qty,
+          minPerUnit: sg.st.min, durationMin: sg.dur, machine: sg.res.machine,
+          startAxis: sg.res.start, endAxis: sg.end,
+          start: cal.toWall(sg.res.start), end: cal.toWall(sg.end),
+          startDate: cal.toClock(sg.res.start).date, startTime: cal.toClock(sg.res.start).time,
+          endDate: cal.toClock(sg.end).date, endTime: cal.toClock(sg.end).time,
+          status: 'scheduled', due: job.due, flow: !!job.flow, tight: !!sg.res.tight
+        });
+      });
     }
 
     /**
@@ -896,18 +950,12 @@
         if (!carSt) return;
         var res = placeStep(job, carSt, state, cap, opts);
         if (res.error) {
+          // 【对齐后端】一个 lot 只记一条未排入（_unplannable_rec），
+          // 且不占用机台（后端 place_flow_group 也是整条失败）
           unplan.push({
             orderId: job.orderId, lotId: job.lotId, seq: carSt.seq, op: carSt.op,
             group: carSt.group, reason: res.error.reason,
             blockingMachine: res.error.machine, suggestion: res.error.suggestion
-          });
-          // 车都排不进 → 这个子批两道工序都记为未排入，不许整单消失
-          job.steps.slice(1).forEach(function (st) {
-            unplan.push({
-              orderId: job.orderId, lotId: job.lotId, seq: st.seq, op: st.op,
-              group: st.group, reason: '前道未排入',
-              blockingMachine: res.error.machine, suggestion: res.error.suggestion
-            });
           });
           return;
         }
@@ -1033,7 +1081,7 @@
           }
         };
       }
-      return { machine: best.machine, start: best.start, dur: dur, tight: false };
+      return capCheck(best, dur, st, cand, opts);
     }
 
     for (var c = 0; c < cand.length; c++) {
@@ -1049,18 +1097,80 @@
         best = { machine: mid, start: s, load: load };
       }
     }
-    return { machine: best.machine, start: best.start, dur: dur, tight: false };
+    return capCheck(best, dur, st, cand, opts);
   }
 
-  /** 把某台机的占用区间转成空闲窗口 [{s, e}]，最后一段 e=null 表示无限长 */
-  function freeWindows(busy) {
+  /**
+   * 窗口容量闸门（对齐后端 cal.advance 的日历上限）。
+   * 后端最多延伸到 6 倍窗口（36 个工作日），超出 → 该单判「排不进」。
+   * 前端原先无上限，能把超载的活排到几个月后，与后端口径不一致。
+   */
+  /**
+   * 窗口容量闸门（对齐后端 cal.advance → extend → day_at 的行为）。
+   * 后端：extend 会尝试把日历撑到能容纳 duration 的长度，
+   *       撑到超过 _max_days(36) 时抛 CalendarError → 该单判「排不进」。
+   *       但若日历已被之前的调用撑开（days 长度 > 36），就不再抛错。
+   * 因此实际可用上限 = max(已扩展天数, 首次允许的上限)。
+   * 这里用同样的规则：日历已撑开就按撑开的长度算，否则按 36 天算。
+   */
+  /**
+   * 窗口容量闸门 —— 严格复刻后端 core/workcal.extend() 的语义：
+   *   「把日历撑到能容纳 start+duration 的长度；撑不动（超过 _max_days=36）
+   *     就返回 None → 调用方判定该 lot 排不进」。
+   *
+   * 关键细节：后端 day_at 是「先 append 再检查超限」，所以每次撑不动，
+   * 日历都会多长 1 天再抛错；反复几次日历就被撑开，
+   * 于是后面的单又能排进去（实测 sample4 日历撑到 70 天）。
+   * 前端用同一个 dayAt()，行为自然一致，不另设硬上限。
+   */
+  function capCheck(best, dur, st, cand, opts) {
+    if (!best) {
+      return {
+        error: {
+          reason: '机台 ' + JSON.stringify(cand) + ' 均无 ' + dur + 'min 槽位',
+          machine: cand[0],
+          suggestion: '确认该组设备状态 / 顺延下一窗口'
+        }
+      };
+    }
+    // 试着把日历撑到能容纳（后端 advance → extend 做的同一件事）
+    try {
+      opts.cal.dayAt(Math.floor((best.start + dur) / MIN_PER_DAY));
+    } catch (e) {
+      return {
+        error: {
+          reason: '机台 ' + JSON.stringify(cand) + ' 均无 ' + dur + 'min 槽位' +
+            '（' + (e.userMessage || e.message) + '）',
+          machine: cand[0],
+          suggestion: '产能严重不足：需加设备 / 加班 / 顺延，写进交接说明'
+        }
+      };
+    }
+    return { machine: best.machine, start: best.start, dur: dur, tight: !!best.tight };
+  }
+
+  /**
+   * 把某台机的占用区间转成空闲窗口 [{s, e}]。
+   * 【与后端 Timeline.free_windows 对齐】后端末尾那段的上界是
+   *   max(prev + min_dur, cap + min_dur)  —— 也就是「窗口容量 cap 再加一段」，
+   *   不是无限长。前端若用无限长，紧贴通道会找到窗口外的位置，
+   *   与后端的取舍不同（实测 sample4：前端多排出 20+ 个阀芯C 子批）。
+   * cap 传 null 时退化为无限长（用于 fallback 顺排）。
+   */
+  function freeWindows(busy, minDur, cap) {
     var out = [];
     var t = 0;
     for (var i = 0; i < busy.length; i++) {
       if (busy[i].s > t) out.push({ s: t, e: busy[i].s });
       t = Math.max(t, busy[i].e);
     }
-    out.push({ s: t, e: null });
+    var tailEnd;
+    if (cap === null || cap === undefined) {
+      tailEnd = null;                       // 无限长
+    } else {
+      tailEnd = Math.max(t + (minDur || 0), cap + (minDur || 0));
+    }
+    out.push({ s: t, e: tailEnd });
     return out;
   }
 
@@ -1092,7 +1202,7 @@
     cand.forEach(function (mid) {
       var busy = state[mid].busy;
       // 该机台上的空闲窗口
-      var windows = freeWindows(busy);
+      var windows = freeWindows(busy, dur, opts.cap);
       for (var w = 0; w < windows.length; w++) {
         var ws = windows[w].s, we = windows[w].e;
         for (var gi = 0; gi < gapList.length; gi++) {
@@ -1112,9 +1222,12 @@
       }
     });
 
-    if (best) return best;
+    if (best) return capCheck(best, dur, grdSt, cand, opts);
 
-    /* 退化：顺排，从车完工起找最早可用位置（C3 由校验器判，不隐瞒） */
+    /* 退化：顺排，从车完工起找最早可用位置（C3 由校验器判，不隐瞒）
+       【与后端 _place_flow_fallback_single 对齐】这条路径同样调 cal.advance，
+       一样受日历上限约束 —— 日历撑不开时该子批就是「排不进」。
+       区别只在于：不要求紧贴 ≤30min（gap 由 H5 报违规），而不是直接放弃。 */
     var fallback = null;
     cand.forEach(function (mid) {
       var s = findSlot(state[mid].busy, carEnd, dur);
@@ -1123,7 +1236,8 @@
         fallback = { machine: mid, start: s, dur: dur, gap: s - carEnd, tight: false, load: load };
       }
     });
-    return fallback || {
+    if (fallback) return capCheck(fallback, dur, grdSt, cand, opts);
+    return {
       error: {
         reason: '磨床无可用窗口',
         machine: cand[0],
@@ -1151,16 +1265,25 @@
       seen[k] = true;
     });
     var expectedCount = Object.keys(expected).length;
-    var unplanKeys = {};
-    sched.unplan.forEach(function (u) { unplanKeys[u.lotId + '|' + u.seq] = true; });
+    /* 【与后端 checker.check_h1 对齐】后端：某道工序没排入时，
+       只要它在 all_ops 里被标了 status=unplannable（整个 lot 失败），
+       就归入 skipped 而不是 violation —— 因为「排不进」不是「漏排」。
+       前端排程是原子操作（一个 lot 失败就整条不排），只记 1 条未排入记录，
+       所以这里按【lot 粒度】判定：某个 lot 只要有失败记录，
+       它名下的其它工序都算「已登记为未排入」，不是漏排。 */
+    var unplanLots = {};
+    sched.unplan.forEach(function (u) { unplanLots[u.lotId] = true; });
+    var h1Skip = 0;
     Object.keys(expected).forEach(function (k) {
-      if (!seen[k] && !unplanKeys[k]) {
-        h1.push({ text: toId(k) + ' 工序未排入且未登记原因（漏排）', orderId: toId(k) });
-      }
+      if (seen[k]) return;
+      var lotId = k.split('|')[0];
+      if (unplanLots[lotId]) { h1Skip++; return; }   // 整个 lot 已登记为「排不进」，不是漏排
+      h1.push({ text: toId(k) + ' 工序未排入且未登记原因（漏排）', orderId: toId(k) });
     });
     lines.push({
       code: 'H1', name: '每道工序恰好一次', ok: h1.length === 0,
-      detail: (sched.ops.length + sched.unplan.length) + '/' + expectedCount + '（已排 ' + sched.ops.length + ' + 未排入 ' + sched.unplan.length + '）',
+      /* 与后端一致：checked = 全部工序数；未排入的算 skipped，不是 violation */
+      detail: expectedCount + '/' + expectedCount + '（已排 ' + sched.ops.length + '，未排入 ' + h1Skip + ' 道已登记为「排不进」）',
       violations: h1
     });
 
@@ -1323,13 +1446,26 @@
       lotEnd[o.lotId] = Math.max(lotEnd[o.lotId] || 0, o.endAxis);
     });
 
+    /* 【与后端 report.py 对齐】「排全了」按【数量】判定，不按工序条数：
+       后端 per_order_qty = 各子批 seq==1（第一道工序）排入的数量之和，
+       只要 < qty_total 就是 unplannable（没排全 = 排不进）。
+       前端原先按「每道工序都排到了」判断，超载时会把只排了一半的单
+       标成「延期」，与后端的「排不进」口径不一致。 */
+    var plannedQty = {};   // orderId → 已排入数量（取首道工序）
+    sched.ops.forEach(function (o) {
+      if (o.seq === 1) plannedQty[o.orderId] = (plannedQty[o.orderId] || 0) + (o.qty || 0);
+    });
+
     var rows = [];
     model.orders.forEach(function (o) {
       var myLots = model.jobs.filter(function (j) { return j.orderId === o.id; })
         .map(function (j) { return j.lotId; });
       var planned = myLots.reduce(function (a, l) { return a + (done[l] || 0); }, 0);
       var needOps = myLots.reduce(function (a, l) { return a + (need[l] || 0); }, 0);
-      var complete = myLots.length > 0 && myLots.every(function (l) { return (done[l] || 0) >= (need[l] || 0); });
+      /* 排全了吗？按【数量】判定（与后端 decide_status 一致）：
+         已排入数量 >= 订单数量 才算排全。工序条数只用于展示，不用于判定。 */
+      var qtyPlanned = plannedQty[o.id] || 0;
+      var complete = qtyPlanned + 1e-6 >= o.qty;
       var endAxis = myLots.reduce(function (a, l) { return Math.max(a, lotEnd[l] || 0); }, 0);
       var plannedEnd = complete ? endAxis : null;
       // 交期落在周日 → 顺延到下一个工作日（工厂周日不排）
@@ -1589,6 +1725,9 @@
     opts.cal = makeCalendar(startNum);
     opts.year = numToYmd(startNum)[0];
     opts.month = numToYmd(startNum)[1];
+    /* 窗口容量（后端 horizon["cap"]）：单台机在窗口内的总可用分钟。
+       C3 紧贴通道用它限制空闲窗口的上界（对齐后端 free_windows）。 */
+    opts.cap = WINDOW_DAYS * MIN_PER_DAY;
 
     stage('清洗脏数据', 0.3);
     var cap = buildCapacity(model, opts);
@@ -1849,10 +1988,10 @@
   function quickScore(model, sched, opts) {
     var cal = opts.cal;
 
-    // [0] 未排入 lot 数：有任一工序没排进去的 lot 就算一个
-    var lotsWithUnplan = {};
-    sched.unplan.forEach(function (u) { lotsWithUnplan[u.lotId] = true; });
-    var unplanLots = Object.keys(lotsWithUnplan).length;
+    // [0] 未排入条数  ← 后端 len(unplannable)
+    //     【与后端同口径】一个 lot 只记一条未排入（place_lot 原子失败），
+    //     所以这里的记录数 == 后端的 unplannable 条数，可直接比较。
+    var unplanCount = sched.unplan.length;
 
     var delayed = 0, delayMin = 0, urgentEnd = 0, urgentN = 0;
     var lotEnd = {}, lotNeed = {};
@@ -1874,7 +2013,7 @@
       if (end > dueAxis) { delayed++; delayMin += (end - dueAxis); }
     });
 
-    return [unplanLots, delayed, delayMin, r0(sched.makespan),
+    return [unplanCount, delayed, delayMin, r0(sched.makespan),
             urgentN ? r0(urgentEnd / urgentN) : 0];
   }
 

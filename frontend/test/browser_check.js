@@ -301,6 +301,7 @@ function ok(cond, label, extra) {
 
   await browser.close();
   console.log('\n结果：' + (fails ? '❌ ' + fails + ' 项失败' : '✅ 全部通过') + '\n');
+  console.log('提示：换数据回归测试见 samples_check.js（8 份样例台账，覆盖空表/超载/单号重复等换数据场景）\n');
   process.exitCode = fails ? 1 : 0;
 })();
 
