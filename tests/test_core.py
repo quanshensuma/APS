@@ -489,6 +489,173 @@ def test_E2_duration_sum_handcheck():
 
 
 # ============================================================
+# E3 · 样例台账端到端回归（换数据不塌）
+# ============================================================
+# 背景：PPT 第 24 页「换了数据就跑不了」、任务书 N6「换一份改过的台账再跑一次」。
+# 之前的两个真实缺陷（重复单号只到 -R2、超载时前后端判定不一致）都是
+# 「换一份数据」才暴露的，主台账的测试全绿也照样漏。
+# 样例为合成数据（tests/samples/*.xlsx，生成脚本 _verify/gen_samples.py），
+# 不含任何客户信息。xlsx 缺失时跳过，保证没数据的 CI 环境也能跑。
+
+def _sample(name):
+    """取一份样例台账路径；不存在返回 None（调用方跳过）。"""
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    p = os.path.join(here, "tests", "samples", name)
+    return p if os.path.exists(p) else None
+
+
+def _pipeline(name):
+    """跑完整链路 reader → cleaner → instance → solver → checker。
+    返回 (raw, clean, sched, unplan, report)；读文件失败抛异常由调用方断言。"""
+    from core import reader
+    p = _sample(name)
+    raw = reader.read_workbook(p)
+    opts = config.RunOptions()
+    hz = cal.make_horizon(config.horizon_start(_dt.date(2026, 11, 8)))
+    clean = cleaner.clean(raw, opts, hz)
+    ops = instance.build_ops(clean, opts)
+    res = solver.solve_all(ops, clean, hz, opts)
+    sched = res["scheduled"]
+    unplan = res["unplannable"]
+    report = checker.verify_all(sched, clean, hz, opts, unplan)
+    return raw, clean, sched, unplan, report
+
+
+def test_E3_01_sample1_empty_orders_raises():
+    """sample1 空订单 → EmptyDataError（不是白屏、不是静默 0 单）。"""
+    from core.reader import EmptyDataError
+    p = _sample("sample1_空订单.xlsx")
+    if not p:
+        return
+    from core import reader
+    try:
+        reader.read_workbook(p)
+        raise AssertionError("空订单样例本应抛 EmptyDataError")
+    except EmptyDataError:
+        pass
+
+
+def test_E3_02_sample7_all_qty_blank_blocked():
+    """sample7 数量全空 → 全部进闸门，可排订单为 0。"""
+    p = _sample("sample7_数量全空.xlsx")
+    if not p:
+        return
+    from core import reader
+    raw = reader.read_workbook(p)
+    opts = config.RunOptions()
+    hz = cal.make_horizon(config.horizon_start(_dt.date(2026, 11, 8)))
+    clean = cleaner.clean(raw, opts, hz)
+    assert len(clean["orders"]) == 0, f"应全部进闸门，实际可排 {len(clean['orders'])} 单"
+    assert len(clean["blocked"]) > 0, "应有闸门记录"
+
+
+def test_E3_03_sample8_dup_ids_all_distinct():
+    """sample8 单号重复 → 13 单且 id 互不相同（-R2/-R3… 递增，不得都叫 -R2）。"""
+    p = _sample("sample8_单号重复.xlsx")
+    if not p:
+        return
+    from core import reader
+    raw = reader.read_workbook(p)
+    opts = config.RunOptions()
+    hz = cal.make_horizon(config.horizon_start(_dt.date(2026, 11, 8)))
+    clean = cleaner.clean(raw, opts, hz)
+    ids = [o["id"] for o in clean["orders"]]
+    assert len(ids) == 13, f"应 13 单，实际 {len(ids)}"
+    assert len(set(ids)) == len(ids), f"单号有重复：{ids}"
+    # 必须出现 -R2 与 -R3，证明是递增而不是固定 -R2
+    assert any(i.endswith("-R2") for i in ids), f"缺少 -R2：{ids}"
+    assert any(i.endswith("-R3") for i in ids), f"缺少 -R3（递增改名失效）：{ids}"
+
+
+def test_E3_04_sample8_lot_ids_distinct():
+    """sample8：不同订单之间 lot_id 不能撞名，否则工序分组会互相覆盖、多个单塌缩成一个。
+    【注意】同一个 lot_id 出现多次是正常的 —— 那���同一子批的多道工序
+    （阀芯C 还会按 -L1/-L2 拆子批）。唯一性要按 (order_id, lot_id) 组合看。"""
+    p = _sample("sample8_单号重复.xlsx")
+    if not p:
+        return
+    from core import reader
+    raw = reader.read_workbook(p)
+    opts = config.RunOptions()
+    hz = cal.make_horizon(config.horizon_start(_dt.date(2026, 11, 8)))
+    clean = cleaner.clean(raw, opts, hz)
+    ops = instance.build_ops(clean, opts)
+    # 同一 (order_id, lot_id) 下的工序组，lot_id 必须唯一指向一个订单
+    lot_to_orders = {}
+    for o in ops:
+        lot_to_orders.setdefault(o["lot_id"], set()).add(o["order_id"])
+    crossed = {k: v for k, v in lot_to_orders.items() if len(v) > 1}
+    assert not crossed, f"lot_id 跨订单撞名：{list(crossed)[:5]}"
+    # 单号与 lot_id 前缀必须一致（改名后 lot 要跟着改名）
+    for o in ops:
+        assert o["lot_id"].startswith(o["order_id"]), \
+            f"lot_id {o['lot_id']} 未跟随 order_id {o['order_id']}"
+
+
+def test_E3_05_sample4_overload_no_hard_violation():
+    """sample4 大批量超载 21 倍 → H1~H4 零违反。
+    【关键】排不下属于「未排入」，不是「撞机」——超载不是违反硬约束的理由。"""
+    p = _sample("sample4_大批量.xlsx")
+    if not p:
+        return
+    _, _, sched, unplan, report = _pipeline("sample4_大批量.xlsx")
+    for name in ("H1", "H2", "H3", "H4"):
+        res = getattr(report, name.lower(), None)
+        if res is None:
+            continue
+        violations = getattr(res, "violations", []) or []
+        assert len(violations) == 0, f"{name} 有 {len(violations)} 项违反：{violations[:3]}"
+
+
+def test_E3_06_sample2_single_order():
+    """sample2 单订单 → 能排出结果且校验器 0 违反。"""
+    p = _sample("sample2_单订单.xlsx")
+    if not p:
+        return
+    _, _, sched, unplan, report = _pipeline("sample2_单订单.xlsx")
+    assert len(sched) > 0, "单订单样例应排出至少一道工序"
+    assert report.result in ("PASS", "PASS_WITH_SKIP", "PASS_WITH_WARN"), \
+        f"校验结论异常：{report.result}"
+
+
+def test_E3_07_dup_id_three_times():
+    """同单号出现 3 次 → 三个 id 分别为 X、X-R2、X-R3（互不相同）。"""
+    p = _sample("sample8_单号重复.xlsx")
+    if not p:
+        return
+    from core import reader
+    raw = reader.read_workbook(p)
+    opts = config.RunOptions()
+    hz = cal.make_horizon(config.horizon_start(_dt.date(2026, 11, 8)))
+    clean = cleaner.clean(raw, opts, hz)
+    ids = [o["id"] for o in clean["orders"]]
+    r2 = [i for i in ids if i.endswith("-R2")]
+    r3 = [i for i in ids if i.endswith("-R3")]
+    assert len(r2) == 1, f"-R2 应只出现一次，实际 {len(r2)} 次：{ids}"
+    assert len(r3) == 1, f"-R3 应只出现一次，实际 {len(r3)} 次：{ids}"
+
+
+def test_E3_08_dup_id_five_times():
+    """同单号出现 5 次 → 5 个 id 全不相同，且不同订单之间 lot_id 不撞名。"""
+    p = _sample("sample8_单号重复.xlsx")
+    if not p:
+        return
+    from core import reader
+    raw = reader.read_workbook(p)
+    opts = config.RunOptions()
+    hz = cal.make_horizon(config.horizon_start(_dt.date(2026, 11, 8)))
+    clean = cleaner.clean(raw, opts, hz)
+    ids = [o["id"] for o in clean["orders"]]
+    assert len(set(ids)) == len(ids), "5 个 id 有重复"
+    ops = instance.build_ops(clean, opts)
+    lot_to_orders = {}
+    for o in ops:
+        lot_to_orders.setdefault(o["lot_id"], set()).add(o["order_id"])
+    crossed = {k: v for k, v in lot_to_orders.items() if len(v) > 1}
+    assert not crossed, f"lot_id 跨订单撞名：{list(crossed)[:5]}"
+
+
+# ============================================================
 # 手跑入口
 # ============================================================
 

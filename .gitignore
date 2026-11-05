@@ -24,6 +24,11 @@ data/*
 !data/.gitkeep
 !docs/samples/*.md
 
+# 例外：tests/samples/ 下的是【合成测试数据】（由 _verify/gen_samples.py 生成），
+# 不是客户台账、不含任何真实客户信息，为「换数据回归测试」必须入库。
+# 真实客户台账仍被上面的 *.xlsx 规则排除，不要往这里放客户文件。
+!tests/samples/*.xlsx
+
 # 中间产物（排程结果转储，含客户单号，可由 run.py / app.py 重生成）
 gen*.json
 g.json
