@@ -409,6 +409,7 @@ def build_orders(orders_raw: list, routes: dict, machines: dict,
     """建订单。返回 (orders, blocked, issues)。"""
     orders, blocked, issues = [], [], []
     seen_ids = {}
+    dup_count = {}          # 原单号 → 已重命名的次数（第 2 次出现=1 → -R2）
 
     for r in orders_raw:
         row = r.get("row")
@@ -430,9 +431,14 @@ def build_orders(orders_raw: list, routes: dict, machines: dict,
                 "handling": n, "need_ask": False, "changed": True,
             })
 
-        # ---- 2. 单号重复 → -R2 ----
+        # ---- 2. 单号重复 → 递增改名 -R2 / -R3 / -Rn ----
+        # 【关键】必须递增：同一单号出现 14 次时，若都叫 -R2，
+        # instance.build_ops() 用 (order_id, lot_id) 分组会互相覆盖，
+        # 13 个单塌缩成 8 个键，风险清单整列「预计完工」变成同一个值。
         if oid in seen_ids:
-            new_id = f"{oid}-R2"
+            dup_count[oid] = dup_count.get(oid, 0) + 1
+            n = dup_count[oid] + 1
+            new_id = f"{oid}-R{n}"
             issues.append({
                 "row": row, "locator": loc_id, "category": "单号重复",
                 "severity": "warn",
