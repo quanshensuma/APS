@@ -1,5 +1,5 @@
 /**
- * 真实后端端到端冒烟：连 server/app.py，走完整 http 流程
+ * 真实后端端到端冒烟：连 web/app.py，走完整 http 流程
  * 运行：node test/smoke_e2e.js [port]
  */
 const { chromium } = require('playwright');
@@ -27,7 +27,7 @@ const ok = (c, l, e) => {
   console.log('\n=== 1. 打开服务托管的页面 ===');
   // 【临时绕过】后端 _send_file 对所有文件都发 Content-Disposition: attachment，
   // 导致 index.html 被当下载。这里仅在本测试里去掉该头以验证前端逻辑；
-  // 真实修复需后端会话改 server/app.py（见交付说明）。
+  // 真实修复需后端会话改 web/app.py（见交付说明）。
   await page.route('**/*', async (route) => {
     const req = route.request();
     const url = req.url();

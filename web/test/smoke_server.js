@@ -27,7 +27,7 @@ function mockPayload(withFields, realShape) {
     risks: rs.risks || [
       { orderId: 'HD-2026-101', type: 'delayed', dueMd: '11-10', plannedEndLabel: '11-17 16:00', bottleneckMachine: 'GRD-01', bottleneckOp: '磨', qty: 40 }
     ],
-    // 【真实契约】server/app.py 的 schedule 是数组；本地 engine 才是 {operations:[]}
+    // 【真实契约】web/app.py 的 schedule 是数组；本地 engine 才是 {operations:[]}
     schedule: rs.scheduleArray ? new Array(65).fill(0).map((_, i) => ({ seq: i + 1 }))
       : { operations: [] },
     unplannable: [],
@@ -41,7 +41,7 @@ function mockPayload(withFields, realShape) {
     }
   };
   if (withFields) {
-    // 真实后端契约（server/app.py 已落地）：handover/confirm 是产物描述，不是内联正文
+    // 真实后端契约（web/app.py 已落地）：handover/confirm 是产物描述，不是内联正文
     base.artifacts = [
       { name: '排单表.xlsx', title: '周排单表', available: true, stale: false, downloadUrl: '/api/download/%E6%8E%92%E5%8D%95%E8%A1%A8.xlsx' },
       { name: '甘特图.html', title: '甘特图', available: true, stale: false, downloadUrl: '/api/download/gantt' },
@@ -182,7 +182,7 @@ async function run(withFields, realShape) {
    * C. 真实契约形状：蛇形 metrics + risks、schedule 为**数组**
    *
    * 【为什么必须单独测】上面 A/B 两组的 mock 是驼峰 + schedule:{operations:[]}，
-   * 那是本地 engine 的形状，不是 server/app.py 的真实返回。用旧 mock 测，
+   * 那是本地 engine 的形状，不是 web/app.py 的真实返回。用旧 mock 测，
    * 「风险表整张显示 —」「横幅已排 0/0 道」「准时 0」这三类映射 bug 一个都测不出来。
    * 这一组按 server 真实字段命名，防止回归。
    * ───────────────────────────────────────────────────────────── */

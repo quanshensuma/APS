@@ -235,7 +235,7 @@
       .catch(function (e) {
         if (e && e.userMessage) throw e;
         throw mkErr('连不上本地服务', '浏览器请求 ' + (API_BASE || location.origin) +
-          '/api/generate 失败。请确认 python server/app.py 已启动；或改用双击 index.html 的离线模式。');
+          '/api/generate 失败。请确认 python web/app.py 已启动；或改用双击 index.html 的离线模式。');
       });
   }
 

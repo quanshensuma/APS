@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
-"""server/app.py —— 本地服务（标准库 http.server，不用 Flask）。
+"""web/app.py —— 本地服务（标准库 http.server，不用 Flask）。
 
-任务书 N5：「python server/app.py 起本地服务（用标准库 http.server，不要 Flask）」
+任务书 N5：「python web/app.py 起本地服务（用标准库 http.server，不要 Flask）」
 
 设计要点
 ────────
 1. **两条路都能跑**：
    · 双击 index.html        → 纯浏览器端（自带 engine.js），零依赖
-   · python server/app.py   → 本服务托管前端 + 提供 3 个 API，Excel 产物由后端生成
+   · python web/app.py   → 本服务托管前端 + 提供 3 个 API，Excel 产物由后端生成
    两种模式下页面完全一样，只是"谁来算"不同。
 
 2. **口径对齐**：本文件不重新实现排程，而是调用 core/ 的 Python 引擎；
@@ -36,6 +36,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # 把项目根加入 sys.path，便于 import core / config
+# 本文件位于 <根>/web/app.py，故根 = 上两级目录
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
@@ -44,7 +45,8 @@ import config
 from core import workcal as cal
 from core import cleaner, checker, instance, reader, report, solver
 
-WEB_DIR = os.path.join(ROOT, "frontend")
+# 前端静态资源与本文件同目录（web/）
+WEB_DIR = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.path.join(ROOT, "out")
 VERSION = "1.0.0"
 

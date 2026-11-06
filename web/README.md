@@ -12,7 +12,7 @@
 ### B. 本地服务（任务书 N5 要求）
 
 ```bash
-python server/app.py --port 8765
+python web/app.py --port 8765
 ```
 
 浏览器打开 http://127.0.0.1:8765
@@ -69,8 +69,8 @@ web/
 ## 前后端一致性（parity_check.js）
 
 ```bash
-python server/app.py --port 8765 &
-APS_PORT=8765 node frontend/test/parity_check.js
+python web/app.py --port 8765 &
+APS_PORT=8765 node web/test/parity_check.js
 ```
 
 逐项比对两边的数字：订单数、窗口、五组负荷与缺口、总负荷、H1~H5、风险分类、体检类别。
@@ -158,7 +158,7 @@ APS_PORT=8765 node frontend/test/parity_check.js
 node test/engine_check.js
 
 # 前后端一致性（需先起服务）
-python ../server/app.py --port 8801 &
+python ../web/app.py --port 8801 &
 APS_PORT=8801 node test/parity_check.js
 
 # 浏览器全流程实拍（需要 playwright + chromium）

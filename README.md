@@ -106,10 +106,8 @@ aps-scheduler/
 │   ├── confirm.py     需求确认单（PPT 第 9 页第 1 件交付物）
 │   └── handover.py    交接说明（参数/假设/局限，随运行自动更新）
 │
-├── server/            本地服务（标准库 http.server，托管前端 + 3 个 API）
-│   └── app.py         python server/app.py --port 8801
-│
-├── frontend/          纯浏览器前端（零依赖，可双击 index.html）
+├── web/               前端与服务（任务书要求目录名）
+│   ├── app.py         本地服务（标准库 http.server，托管前端 + 3 个 API）
 │   ├── index.html     页面骨架
 │   ├── app.js         界面逻辑（不计算，数字都来自 engine.js）
 │   ├── engine.js      纯 JS 排程引擎（与 core/ 口径对齐）
@@ -143,7 +141,7 @@ N4 后端与 N6 实测），因此以**标签标记节点级进度**，而非机
 | `v1.1-rules` | N6 | 客户台账实测完成：缺陷 8 修 8、8 份样例回归、前后端逐单一致 |
 
 回归测试（换数据场景）随 `v1.1-rules` 固化：`python tests/test_core.py`（54 条）与
-`frontend/test/samples_check.js`（8 样例 40 断言）。
+`web/test/samples_check.js`（8 样例 40 断言）。
 
 ## 数据红线
 
