@@ -20,10 +20,10 @@
 ### 装依赖（只需一次）
 
 ```bash
-python -m pip install openpyxl
+python -m pip install -r requirements.txt
 ```
 
-Python 3.10+。唯一的外部依赖是 openpyxl。
+Python 3.10+。唯一的外部依赖是 openpyxl（已写入 `requirements.txt`）。
 
 ### 前置：放台账
 
